@@ -256,19 +256,40 @@ def generate_srt(dialogue: List[Dict], words_per_minute: float = 150.0) -> str:
     return "\n".join(srt_parts)
 
 
+def _safe_line(line: Dict) -> Tuple[str, str]:
+    """Extract speaker and text from a dialogue line, handling key variations."""
+    speaker = (
+        line.get("speaker")
+        or line.get("Speaker")
+        or line.get("SPEAKER")
+        or "Unknown"
+    )
+    text = (
+        line.get("text")
+        or line.get("Text")
+        or line.get("TEXT")
+        or line.get("content")
+        or line.get("line")
+        or ""
+    )
+    return speaker, text
+
+
 def export_script_markdown(data: Dict) -> str:
     """Export script as readable Markdown."""
     lines = [f"# {data.get('title', 'Untitled Podcast')}\n"]
-    for line in data.get("dialogue", []):
-        lines.append(f"**{line['speaker']}:** {line['text']}\n")
+    for entry in data.get("dialogue", []):
+        speaker, text = _safe_line(entry)
+        lines.append(f"**{speaker}:** {text}\n")
     return "\n".join(lines)
 
 
 def export_script_plain(data: Dict) -> str:
     """Export script as plain text."""
     lines = [data.get("title", "Untitled Podcast"), "=" * 40, ""]
-    for line in data.get("dialogue", []):
-        lines.append(f"[{line['speaker']}] {line['text']}")
+    for entry in data.get("dialogue", []):
+        speaker, text = _safe_line(entry)
+        lines.append(f"[{speaker}] {text}")
         lines.append("")
     return "\n".join(lines)
 
