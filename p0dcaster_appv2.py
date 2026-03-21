@@ -2,7 +2,8 @@
 PodcastLM Studio v2 — AI-powered podcast generator.
 Bug fixes: thread-safe TTS, music ramp-up ordering, Whisper size check,
 JSON mode fallback, smart truncation, fallback concat integrity.
-New features: HD TTS, per-speaker speed, script export, session save/restore, SRT subtitles.
+New features: HD TTS, per-speaker speed, script export, session save/restore,
+SRT subtitles, DeepSeek as default LLM.
 """
 
 import streamlit as st
@@ -70,6 +71,11 @@ NON_ENGLISH_LANGS = [
     "Japanese", "Korean", "Russian", "Turkish",
 ]
 
+DEEPSEEK_MODEL_MAP = {
+    "DeepSeek-V3 (Recommended)": "deepseek-chat",
+    "DeepSeek-R1 (Reasoning)": "deepseek-reasoner",
+}
+
 GROK_MODEL_MAP = {
     "Grok 4.1 Fast (Recommended)": "grok-4-1-fast-reasoning",
     "Grok 4 Full": "grok-4",
@@ -78,7 +84,8 @@ GROK_MODEL_MAP = {
 }
 
 # Models known to support response_format={"type": "json_object"}
-JSON_MODE_PREFIXES = ("gpt-", "grok-4-1")
+# DeepSeek-V3 (deepseek-chat) supports it; R1 (deepseek-reasoner) does NOT
+JSON_MODE_PREFIXES = ("gpt-", "grok-4-1", "deepseek-chat")
 
 logger = logging.getLogger(__name__)
 
@@ -210,15 +217,23 @@ def get_llm_client(
     specific_model_name: str,
     openai_key: str,
     xai_key: str,
+    deepseek_key: str,
     budget_mode: bool,
 ) -> Tuple[Optional[OpenAI], Optional[str], Optional[str]]:
     """Return (client, model_name, error_message)."""
-    if budget_mode or model_selection == "Model A (OpenAI)":
+    if budget_mode or model_selection == "Model B (OpenAI)":
         if not openai_key:
             return None, None, "Missing OpenAI API Key"
         return OpenAI(api_key=openai_key), "gpt-4o-mini", None
 
-    if model_selection == "Model B (xAI Grok)":
+    if model_selection == "Model A (DeepSeek) ⭐":
+        if not deepseek_key:
+            return None, None, "Missing DeepSeek API Key"
+        actual = DEEPSEEK_MODEL_MAP.get(specific_model_name, "deepseek-chat")
+        client = OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com")
+        return client, actual, None
+
+    if model_selection == "Model C (xAI Grok)":
         if not xai_key:
             return None, None, "Missing xAI API Key"
         actual = GROK_MODEL_MAP.get(specific_model_name, "grok-4-1-fast-reasoning")
@@ -229,8 +244,8 @@ def get_llm_client(
 
 
 def translate_if_needed(text: str, target_lang: str, openai_key: str) -> str:
-    """Translate director notes via a dedicated OpenAI client (never xAI).
-    BUG FIX: original code sent gpt-4o-mini requests to the xAI endpoint."""
+    """Translate director notes via a dedicated OpenAI client (never xAI/DeepSeek).
+    Uses gpt-4o-mini which only exists on OpenAI's endpoint."""
     if not any(lang in target_lang for lang in NON_ENGLISH_LANGS):
         return text
     if not openai_key:
@@ -271,8 +286,7 @@ def generate_tts(
 
 
 def _voice_line_worker(args: tuple) -> Tuple[int, bool, Optional[str]]:
-    """Thread-safe TTS worker — NO Streamlit calls allowed here.
-    BUG FIX: original code called st.warning() from background threads."""
+    """Thread-safe TTS worker — NO Streamlit calls allowed here."""
     (i, line, tts_client, m_voice, f_voice, tmp_path,
      tts_model, h1_speed, h2_speed, c_speed) = args
 
@@ -335,8 +349,7 @@ def download_file(url: str, save_path: str) -> bool:
 
 
 def _write_uploaded_to_disk(uploaded_file, dest: str) -> None:
-    """Persist a Streamlit UploadedFile to a real path for ffmpeg.
-    BUG FIX: original code passed BytesIO directly to ffmpeg.input()."""
+    """Persist a Streamlit UploadedFile to a real path for ffmpeg."""
     with open(dest, "wb") as f:
         f.write(uploaded_file.getvalue())
 
@@ -351,8 +364,7 @@ def mix_final_audio(
     uploaded_intro,
     uploaded_outro,
 ) -> Optional[Path]:
-    """Combine voiced segments, background music, intro/outro into one MP3.
-    BUG FIXES: ramp-up ordering, fallback uses phone-effected segments, removed apad."""
+    """Combine voiced segments, background music, intro/outro into one MP3."""
     tmp = Path(tmp_dir)
     inputs = []
 
@@ -380,7 +392,7 @@ def mix_final_audio(
 
     dialogue = dialogue.filter("loudnorm", I=-16, LRA=11, TP=-1.5)
 
-    # BUG FIX: Prepend silence BEFORE mixing music (so music plays over the gap)
+    # Prepend silence BEFORE mixing music (so music plays over the gap)
     if music_ramp_up and bg_source != "None":
         silence = ffmpeg.input(
             "anullsrc=channel_layout=stereo:sample_rate=44100", f="lavfi", t=5,
@@ -424,7 +436,6 @@ def mix_final_audio(
         stderr = e.stderr.decode(errors="ignore") if e.stderr else "unknown"
         st.warning(f"Advanced mix failed — falling back.\n```\n{stderr}\n```")
         try:
-            # BUG FIX: fallback reuses `inputs` which already includes phone-effected segments
             simple = ffmpeg.concat(*inputs, v=0, a=1, n=len(inputs))
             ffmpeg.output(simple, str(out_path), acodec="mp3", audio_bitrate=AUDIO_BITRATE).run(
                 overwrite_output=True, quiet=True,
@@ -482,7 +493,6 @@ def extract_text_from_files(files, audio_client: Optional[OpenAI] = None) -> str
                 parts.append(raw.decode("utf-8", errors="replace"))
 
             elif name.endswith((".mp3", ".wav", ".m4a", ".mp4", ".webm")):
-                # BUG FIX: check Whisper's 25 MB upload limit before sending
                 if not audio_client:
                     st.warning(f"OpenAI key required to transcribe {file.name}")
                 elif len(raw) > WHISPER_MAX_BYTES:
@@ -507,8 +517,7 @@ def extract_text_from_files(files, audio_client: Optional[OpenAI] = None) -> str
 def download_and_transcribe_video(
     url: str, audio_client: OpenAI,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Download audio from a video URL and transcribe via Whisper.
-    BUG FIX: removed fragile asyncio.new_event_loop() — runs synchronously."""
+    """Download audio from a video URL and transcribe via Whisper."""
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             ydl_opts = {
@@ -542,16 +551,29 @@ with st.sidebar:
     openai_key = st.secrets.get("OPENAI_API_KEY") or st.text_input(
         "OpenAI API Key", type="password",
     )
+    deepseek_key = st.secrets.get("DEEPSEEK_API_KEY") or st.text_input(
+        "DeepSeek API Key", type="password",
+    )
     xai_key = st.secrets.get("XAI_API_KEY") or st.text_input(
         "xAI API Key (Optional)", type="password",
     )
 
-    model_choice = st.radio("Intelligence Engine", ["Model A (OpenAI)", "Model B (xAI Grok)"])
+    model_choice = st.radio(
+        "Intelligence Engine",
+        ["Model A (DeepSeek) ⭐", "Model B (OpenAI)", "Model C (xAI Grok)"],
+        help="DeepSeek-V3 is the default — best quality-to-cost ratio",
+    )
+    deepseek_version = "DeepSeek-V3 (Recommended)"
     xai_version = "Grok 4.1 Fast (Recommended)"
-    if model_choice == "Model B (xAI Grok)":
+    if model_choice == "Model A (DeepSeek) ⭐":
+        deepseek_version = st.selectbox("DeepSeek Model", list(DEEPSEEK_MODEL_MAP.keys()))
+    elif model_choice == "Model C (xAI Grok)":
         xai_version = st.selectbox("Grok Model", list(GROK_MODEL_MAP.keys()))
 
-    budget_mode = st.checkbox("💰 Budget Mode (GPT-4o-mini)", help="~90% cheaper LLM cost")
+    budget_mode = st.checkbox(
+        "💰 Budget Mode (GPT-4o-mini)",
+        help="Overrides model selection — uses cheapest option",
+    )
     privacy_mode = st.toggle("🔒 Privacy Mode", value=False)
 
     if st.button("🔄 New Session"):
@@ -575,7 +597,7 @@ with st.sidebar:
     host2_persona = st.text_input("Host 2 Persona", "Female, enthusiastic expert")
     voice_style = st.selectbox("Voice Pair", list(VOICE_MAP.keys()))
 
-    # NEW FEATURE: Per-speaker speed controls
+    # Per-speaker speed controls
     st.caption("Speaking Speed")
     spd_c1, spd_c2 = st.columns(2)
     with spd_c1:
@@ -584,7 +606,7 @@ with st.sidebar:
         host2_speed = st.slider("Host 2", 0.70, 1.30, 1.0, 0.05, key="h2_speed")
     caller_speed = st.slider("Caller", 0.70, 1.30, 0.95, 0.05, key="caller_speed")
 
-    # NEW FEATURE: TTS quality toggle
+    # TTS quality toggle
     tts_hd = st.checkbox(
         "🔊 HD Voices (TTS-1-HD)",
         help="2× TTS cost, noticeably better quality",
@@ -607,7 +629,7 @@ with st.sidebar:
         uploaded_intro = st.file_uploader("Intro clip", type=["mp3", "wav"])
         uploaded_outro = st.file_uploader("Outro clip", type=["mp3", "wav"])
 
-    # NEW FEATURE: Session save / restore
+    # Session save / restore
     st.divider()
     with st.expander("💾 Session Save / Restore"):
         if st.session_state.script_data or st.session_state.source_text:
@@ -643,10 +665,19 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Invalid session file: {e}")
 
-    # Cost estimate — updated for HD pricing
+    # Cost estimate — accounts for DeepSeek, OpenAI, Grok, and HD pricing
     st.divider()
     st.subheader("💵 Cost Estimate")
     tts_rate = TTS_HD_COST_PER_MILLION_CHARS if tts_hd else TTS_COST_PER_MILLION_CHARS
+
+    def _get_llm_cost() -> float:
+        """Return estimated LLM cost based on current model selection."""
+        if budget_mode or model_choice == "Model B (OpenAI)":
+            return 0.10
+        elif model_choice == "Model A (DeepSeek) ⭐":
+            return 0.03
+        else:
+            return 0.30
 
     if st.session_state.script_data:
         total_chars = sum(
@@ -654,23 +685,20 @@ with st.sidebar:
         )
         total_lines = len(st.session_state.script_data["dialogue"])
         tts_cost = (total_chars / 1_000_000) * tts_rate
-        llm_cost = (
-            0.10 if (budget_mode or model_choice == "Model A (OpenAI)") else 0.30
-        )
+        llm_cost = _get_llm_cost()
         c1, c2 = st.columns(2)
         c1.metric("TTS", f"${tts_cost:.3f}")
         c2.metric("LLM", f"${llm_cost:.2f}")
         st.success(f"**Estimated total ≈ ${tts_cost + llm_cost:.2f}**")
         st.caption(
-            f"{total_lines} lines · {total_chars:,} chars" + (" · HD" if tts_hd else "")
+            f"{total_lines} lines · {total_chars:,} chars"
+            + (" · HD" if tts_hd else "")
         )
     else:
         target_words = WORD_TARGETS[length_option]
         est_chars = int(target_words * 5.5)
         est_tts = (est_chars / 1_000_000) * tts_rate
-        est_llm = (
-            0.10 if (budget_mode or model_choice == "Model A (OpenAI)") else 0.30
-        )
+        est_llm = _get_llm_cost()
         st.info(
             f"Pre-gen estimate ≈ **${est_tts + est_llm:.2f}** for {length_option}"
             + (" · HD" if tts_hd else "")
@@ -678,7 +706,20 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
-# Shared client
+# Helper to resolve the correct specific_model_name for get_llm_client
+# ---------------------------------------------------------------------------
+def _resolve_model_name() -> str:
+    """Return the correct sub-model name based on current model_choice."""
+    if model_choice == "Model A (DeepSeek) ⭐":
+        return deepseek_version
+    elif model_choice == "Model C (xAI Grok)":
+        return xai_version
+    else:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Shared client (for TTS / Whisper — always OpenAI)
 # ---------------------------------------------------------------------------
 audio_client: Optional[OpenAI] = OpenAI(api_key=openai_key) if openai_key else None
 
@@ -769,7 +810,8 @@ with tab2:
                 st.markdown(user_question)
 
             client, model, err = get_llm_client(
-                model_choice, xai_version, openai_key, xai_key, budget_mode,
+                model_choice, _resolve_model_name(),
+                openai_key, xai_key, deepseek_key, budget_mode,
             )
             if err:
                 st.error(err)
@@ -827,7 +869,8 @@ with tab3:
             st.error("Load source content first (Tab 1).")
         else:
             client, model, err = get_llm_client(
-                model_choice, xai_version, openai_key, xai_key, budget_mode,
+                model_choice, _resolve_model_name(),
+                openai_key, xai_key, deepseek_key, budget_mode,
             )
             if err:
                 st.error(err)
@@ -868,11 +911,11 @@ Source material:
 {source_text}"""
 
                     try:
-                        # BUG FIX: only request json_object for models that support it
                         kwargs: Dict[str, Any] = {
                             "model": model,
                             "messages": [{"role": "user", "content": prompt}],
                         }
+                        # Only request json_object for models that support it
                         if any(model.startswith(p) for p in JSON_MODE_PREFIXES):
                             kwargs["response_format"] = {"type": "json_object"}
 
@@ -913,7 +956,7 @@ Source material:
             f"est. {word_count // 150} min"
         )
 
-        # NEW FEATURE: Script export buttons
+        # Script export buttons
         exp_c1, exp_c2, exp_c3 = st.columns(3)
         with exp_c1:
             st.download_button(
@@ -963,7 +1006,7 @@ Source material:
                     st.success("Saved.")
                     st.rerun()
 
-        # --- Rehearsal (uses correct TTS model and per-speaker speed) ---
+        # --- Rehearsal ---
         st.subheader("🎧 Live Rehearsal")
         idx = st.selectbox(
             "Preview a line",
@@ -1014,7 +1057,7 @@ with tab4:
             tmp = Path(tmp_dir)
             script = st.session_state.script_data["dialogue"]
 
-            # --- Parallel TTS (thread-safe: errors collected, not printed) ---
+            # Parallel TTS (thread-safe: errors collected, not printed)
             args_list = [
                 (
                     i, line, tts_client, m_voice, f_voice, tmp,
