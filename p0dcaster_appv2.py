@@ -979,10 +979,15 @@ Source material:
 {source_text}"""
 
                     try:
+                        # Clamp max_tokens to model's actual limit
+                        desired_tokens = MAX_OUTPUT_TOKENS.get(length_option, 4_096)
+                        model_cap = MODEL_MAX_TOKENS.get(model, DEFAULT_MODEL_MAX)
+                        safe_tokens = min(desired_tokens, model_cap)
+
                         kwargs: Dict[str, Any] = {
                             "model": model,
                             "messages": [{"role": "user", "content": prompt}],
-                            "max_tokens": MAX_OUTPUT_TOKENS.get(length_option, 8_192),
+                            "max_tokens": safe_tokens,
                         }
                         # Only request json_object for models that support it
                         if any(model.startswith(p) for p in JSON_MODE_PREFIXES):
