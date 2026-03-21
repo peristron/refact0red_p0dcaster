@@ -3,11 +3,12 @@ PodcastLM Studio v2 — AI-powered podcast generator.
 Bug fixes: thread-safe TTS, music ramp-up ordering, Whisper size check,
 JSON mode fallback, smart truncation, fallback concat integrity.
 New features: HD TTS, per-speaker speed, script export, session save/restore,
-SRT subtitles, DeepSeek as default LLM.
+SRT subtitles, DeepSeek as default LLM, truncation recovery.
 """
 
 import streamlit as st
 import os
+import re
 import tempfile
 import json
 import requests
@@ -87,6 +88,22 @@ GROK_MODEL_MAP = {
 # DeepSeek-V3 (deepseek-chat) supports it; R1 (deepseek-reasoner) does NOT
 JSON_MODE_PREFIXES = ("gpt-", "grok-4-1", "deepseek-chat")
 
+# Output token budget per script length (must fit within model limits)
+MAX_OUTPUT_TOKENS = {
+    "Short (2 min)": 4_096,
+    "Medium (5 min)": 8_192,
+    "Long (15 min)": 16_384,
+    "Extra Long (30 min)": 16_384,
+}
+
+# Scale source input to leave room for output
+SOURCE_CHARS_BY_LENGTH = {
+    "Short (2 min)": 15_000,
+    "Medium (5 min)": 30_000,
+    "Long (15 min)": 40_000,
+    "Extra Long (30 min)": 40_000,
+}
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -159,6 +176,45 @@ def smart_truncate(text: str, max_chars: int = MAX_SOURCE_CHARS) -> str:
         if last > max_chars * 0.8:
             return truncated[: last + 1]
     return truncated
+
+
+def repair_truncated_json(raw: str) -> Optional[Dict]:
+    """Attempt to salvage a usable script from truncated LLM JSON output.
+
+    Uses regex to extract all fully-complete dialogue entries,
+    then rebuilds the JSON structure. Returns None if nothing salvageable.
+    """
+    # Try parsing as-is first (maybe it's fine)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # Extract title
+    title_match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+    title = title_match.group(1) if title_match else "Untitled Podcast"
+
+    # Find all COMPLETE {"speaker": "...", "text": "..."} entries
+    pattern = r'\{\s*"speaker"\s*:\s*"([^"]*)"\s*,\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}'
+    matches = re.findall(pattern, raw, re.DOTALL)
+
+    if not matches:
+        return None
+
+    dialogue = []
+    for speaker, text in matches:
+        # Unescape JSON string escapes (e.g., \" \n \t)
+        try:
+            unescaped = json.loads(f'"{text}"')
+        except (json.JSONDecodeError, ValueError):
+            unescaped = (
+                text.replace('\\"', '"')
+                .replace('\\n', '\n')
+                .replace('\\t', '\t')
+            )
+        dialogue.append({"speaker": speaker, "text": unescaped})
+
+    return {"title": title, "dialogue": dialogue}
 
 
 def _seconds_to_srt_time(seconds: float) -> str:
@@ -888,7 +944,11 @@ with tab3:
                             f"— the hosts then respond thoughtfully."
                         )
 
-                    source_text = smart_truncate(st.session_state.source_text)
+                    # Scale source length to leave output room
+                    source_limit = SOURCE_CHARS_BY_LENGTH.get(length_option, MAX_SOURCE_CHARS)
+                    source_text = smart_truncate(
+                        st.session_state.source_text, max_chars=source_limit,
+                    )
 
                     prompt = f"""Create a podcast script in {language}.
 
@@ -914,6 +974,7 @@ Source material:
                         kwargs: Dict[str, Any] = {
                             "model": model,
                             "messages": [{"role": "user", "content": prompt}],
+                            "max_tokens": MAX_OUTPUT_TOKENS.get(length_option, 8_192),
                         }
                         # Only request json_object for models that support it
                         if any(model.startswith(p) for p in JSON_MODE_PREFIXES):
@@ -922,25 +983,54 @@ Source material:
                         res = client.chat.completions.create(**kwargs)
                         raw = res.choices[0].message.content
 
+                        # Check if output was truncated
+                        finish_reason = getattr(res.choices[0], "finish_reason", "stop")
+                        was_truncated = finish_reason in ("length", "max_tokens")
+
                         # Robust JSON parsing — strip markdown fences if present
                         cleaned = raw.strip()
                         if cleaned.startswith("```"):
                             cleaned = cleaned.split("\n", 1)[1]
                         if cleaned.endswith("```"):
                             cleaned = cleaned.rsplit("```", 1)[0]
+                        cleaned = cleaned.strip()
 
-                        st.session_state.script_data = json.loads(cleaned.strip())
-                        st.success("✅ Script generated!")
+                        # Try normal parse first, then repair if needed
+                        parsed = None
+                        try:
+                            parsed = json.loads(cleaned)
+                        except json.JSONDecodeError:
+                            parsed = repair_truncated_json(cleaned)
 
-                        if privacy_mode:
-                            st.session_state.source_text = ""
-                            st.info("🔒 Source text wiped (Privacy Mode).")
+                        if parsed and "dialogue" in parsed and len(parsed["dialogue"]) > 0:
+                            st.session_state.script_data = parsed
 
-                    except json.JSONDecodeError as e:
-                        st.error(
-                            f"Script JSON parsing failed: {e}\n\n"
-                            f"Raw output:\n```\n{raw[:500]}\n```"
-                        )
+                            if was_truncated:
+                                actual_words = sum(
+                                    len(l["text"].split()) for l in parsed["dialogue"]
+                                )
+                                st.warning(
+                                    f"⚠️ Output was truncated by the model — "
+                                    f"recovered {len(parsed['dialogue'])} lines "
+                                    f"(~{actual_words:,} words out of "
+                                    f"{target_words:,} requested).\n\n"
+                                    f"**To fix:** try a shorter Duration, or switch to "
+                                    f"Budget Mode (GPT-4o-mini supports longer outputs)."
+                                )
+                            else:
+                                st.success("✅ Script generated!")
+
+                            if privacy_mode:
+                                st.session_state.source_text = ""
+                                st.info("🔒 Source text wiped (Privacy Mode).")
+                        else:
+                            st.error(
+                                f"Could not parse or repair the script output.\n\n"
+                                f"Raw output (first 500 chars):\n"
+                                f"```\n{raw[:500]}\n```\n\n"
+                                f"**Try:** shorter Duration, or Budget Mode (GPT-4o-mini)."
+                            )
+
                     except Exception as e:
                         st.error(f"Script generation failed: {e}")
 
