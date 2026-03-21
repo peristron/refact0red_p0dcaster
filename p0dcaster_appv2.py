@@ -1036,6 +1036,15 @@ Source material:
                         except json.JSONDecodeError:
                             parsed = repair_truncated_json(cleaned)
 
+                        # Normalize keys so the rest of the app can use line["speaker"] / line["text"] safely
+                        if parsed and "dialogue" in parsed:
+                            normalized = []
+                            for entry in parsed["dialogue"]:
+                                speaker, text = _safe_line(entry)
+                                if text:  # skip empty entries
+                                    normalized.append({"speaker": speaker, "text": text})
+                            parsed["dialogue"] = normalized
+
                         if parsed and "dialogue" in parsed and len(parsed["dialogue"]) > 0:
                             st.session_state.script_data = parsed
 
