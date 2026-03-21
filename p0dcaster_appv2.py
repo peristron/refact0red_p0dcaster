@@ -88,12 +88,20 @@ GROK_MODEL_MAP = {
 # DeepSeek-V3 (deepseek-chat) supports it; R1 (deepseek-reasoner) does NOT
 JSON_MODE_PREFIXES = ("gpt-", "grok-4-1", "deepseek-chat")
 
-# Output token budget per script length (must fit within model limits)
+# Output token budget per script length
+# DeepSeek-V3 caps at 8,192; GPT-4o-mini caps at 16,384; Grok varies
+MODEL_MAX_TOKENS = {
+    "deepseek-chat": 8_192,
+    "deepseek-reasoner": 8_192,
+    "gpt-4o-mini": 16_384,
+}
+DEFAULT_MODEL_MAX = 8_192  # safe fallback
+
 MAX_OUTPUT_TOKENS = {
-    "Short (2 min)": 4_096,
-    "Medium (5 min)": 8_192,
-    "Long (15 min)": 16_384,
-    "Extra Long (30 min)": 16_384,
+    "Short (2 min)": 2_048,
+    "Medium (5 min)": 4_096,
+    "Long (15 min)": 8_192,
+    "Extra Long (30 min)": 8_192,
 }
 
 # Scale source input to leave room for output
