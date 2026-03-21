@@ -1,6 +1,8 @@
 """
-PodcastLM Studio — AI-powered podcast generator.
-Refactored for reliability, security, and maintainability.
+PodcastLM Studio v2 — AI-powered podcast generator.
+Bug fixes: thread-safe TTS, music ramp-up ordering, Whisper size check,
+JSON mode fallback, smart truncation, fallback concat integrity.
+New features: HD TTS, per-speaker speed, script export, session save/restore, SRT subtitles.
 """
 
 import streamlit as st
@@ -24,16 +26,17 @@ from bs4 import BeautifulSoup
 import yt_dlp
 import ffmpeg
 from openai import OpenAI
-import subprocess
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 MAX_SOURCE_CHARS = 40_000
 TTS_COST_PER_MILLION_CHARS = 15.0
+TTS_HD_COST_PER_MILLION_CHARS = 30.0
 AUDIO_BITRATE = "192k"
 DEFAULT_BG_VOLUME = 0.12
-MAX_TTS_WORKERS = 4  # CHANGED: parallel TTS generation
+MAX_TTS_WORKERS = 4
+WHISPER_MAX_BYTES = 25 * 1024 * 1024
 
 WORD_TARGETS = {
     "Short (2 min)": 800,
@@ -74,6 +77,9 @@ GROK_MODEL_MAP = {
     "Grok Code Fast": "grok-code-fast-1",
 }
 
+# Models known to support response_format={"type": "json_object"}
+JSON_MODE_PREFIXES = ("gpt-", "grok-4-1")
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -87,8 +93,7 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Session state initialization
-# CHANGED: timestamp captured once, not on every rerun
+# Session state — timestamp captured once, not on every rerun
 # ---------------------------------------------------------------------------
 if "session_start" not in st.session_state:
     st.session_state.session_start = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -114,7 +119,7 @@ if not st.session_state.notebook_content:
 
 
 # ---------------------------------------------------------------------------
-# Authentication — CHANGED: timing-safe comparison
+# Authentication — timing-safe comparison
 # ---------------------------------------------------------------------------
 def check_password() -> None:
     entered = st.session_state.get("password_input", "")
@@ -127,8 +132,74 @@ def check_password() -> None:
 
 if not st.session_state.authenticated:
     st.title("🔐 Studio Login")
-    st.text_input("Enter Password", type="password", key="password_input", on_change=check_password)
+    st.text_input(
+        "Enter Password", type="password",
+        key="password_input", on_change=check_password,
+    )
     st.stop()
+
+
+# ---------------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------------
+def smart_truncate(text: str, max_chars: int = MAX_SOURCE_CHARS) -> str:
+    """Truncate at the last sentence boundary before max_chars."""
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    for sep in [". ", ".\n", "! ", "!\n", "? ", "?\n"]:
+        last = truncated.rfind(sep)
+        if last > max_chars * 0.8:
+            return truncated[: last + 1]
+    return truncated
+
+
+def _seconds_to_srt_time(seconds: float) -> str:
+    """Convert seconds to SRT timestamp HH:MM:SS,mmm."""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds % 1) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def generate_srt(dialogue: List[Dict], words_per_minute: float = 150.0) -> str:
+    """Generate SRT subtitle content with estimated timestamps."""
+    srt_parts: List[str] = []
+    current_time = 0.0
+
+    for i, line in enumerate(dialogue):
+        word_count = len(line["text"].split())
+        duration = (word_count / words_per_minute) * 60.0
+
+        start_str = _seconds_to_srt_time(current_time)
+        end_str = _seconds_to_srt_time(current_time + duration)
+
+        srt_parts.append(f"{i + 1}")
+        srt_parts.append(f"{start_str} --> {end_str}")
+        srt_parts.append(f"[{line['speaker']}] {line['text']}")
+        srt_parts.append("")
+
+        current_time += duration + 0.5
+
+    return "\n".join(srt_parts)
+
+
+def export_script_markdown(data: Dict) -> str:
+    """Export script as readable Markdown."""
+    lines = [f"# {data.get('title', 'Untitled Podcast')}\n"]
+    for line in data.get("dialogue", []):
+        lines.append(f"**{line['speaker']}:** {line['text']}\n")
+    return "\n".join(lines)
+
+
+def export_script_plain(data: Dict) -> str:
+    """Export script as plain text."""
+    lines = [data.get("title", "Untitled Podcast"), "=" * 40, ""]
+    for line in data.get("dialogue", []):
+        lines.append(f"[{line['speaker']}] {line['text']}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -157,10 +228,9 @@ def get_llm_client(
     return None, None, "Invalid model selection"
 
 
-# CHANGED: translation now always uses a dedicated OpenAI client so it doesn't
-# break when the active LLM client points at xAI.
 def translate_if_needed(text: str, target_lang: str, openai_key: str) -> str:
-    """Translate director notes into the target language when non-English."""
+    """Translate director notes via a dedicated OpenAI client (never xAI).
+    BUG FIX: original code sent gpt-4o-mini requests to the xAI endpoint."""
     if not any(lang in target_lang for lang in NON_ENGLISH_LANGS):
         return text
     if not openai_key:
@@ -182,10 +252,15 @@ def translate_if_needed(text: str, target_lang: str, openai_key: str) -> str:
 # ---------------------------------------------------------------------------
 # Audio helpers
 # ---------------------------------------------------------------------------
-def generate_tts(client: OpenAI, text: str, voice: str, filepath: str, speed: float = 1.0) -> bool:
-    """Generate a single TTS segment. Returns True on success."""
+def generate_tts(
+    client: OpenAI, text: str, voice: str, filepath: str,
+    tts_model: str = "tts-1", speed: float = 1.0,
+) -> bool:
+    """Generate a single TTS segment (main-thread only). Returns True on success."""
     try:
-        response = client.audio.speech.create(model="tts-1", voice=voice, input=text, speed=speed)
+        response = client.audio.speech.create(
+            model=tts_model, voice=voice, input=text, speed=speed,
+        )
         response.stream_to_file(filepath)
         p = Path(filepath)
         return p.exists() and p.stat().st_size > 0
@@ -195,10 +270,40 @@ def generate_tts(client: OpenAI, text: str, voice: str, filepath: str, speed: fl
         return False
 
 
+def _voice_line_worker(args: tuple) -> Tuple[int, bool, Optional[str]]:
+    """Thread-safe TTS worker — NO Streamlit calls allowed here.
+    BUG FIX: original code called st.warning() from background threads."""
+    (i, line, tts_client, m_voice, f_voice, tmp_path,
+     tts_model, h1_speed, h2_speed, c_speed) = args
+
+    voice = m_voice if line["speaker"] == "Host 1" else f_voice
+    speed = h1_speed if line["speaker"] == "Host 1" else h2_speed
+    if line["speaker"] == "Caller":
+        voice = "fable"
+        speed = c_speed
+
+    path = str(tmp_path / f"{i}.mp3")
+    try:
+        response = tts_client.audio.speech.create(
+            model=tts_model, voice=voice, input=line["text"], speed=speed,
+        )
+        response.stream_to_file(path)
+        p = Path(path)
+        if p.exists() and p.stat().st_size > 0:
+            return i, True, None
+        return i, False, f"Empty audio file for line {i}"
+    except Exception as e:
+        return i, False, str(e)
+
+
 def apply_phone_effect(input_path: str, output_path: str) -> None:
     """Bandpass + echo to simulate a phone caller."""
     try:
-        main = ffmpeg.input(input_path).filter("lowpass", f=3000).filter("highpass", f=300)
+        main = (
+            ffmpeg.input(input_path)
+            .filter("lowpass", f=3000)
+            .filter("highpass", f=300)
+        )
         echo = (
             ffmpeg.input(input_path)
             .filter("adelay", delays="120|120")
@@ -206,7 +311,7 @@ def apply_phone_effect(input_path: str, output_path: str) -> None:
         )
         mixed = ffmpeg.filter([main, echo], "amix", inputs=2)
         ffmpeg.output(mixed, output_path, acodec="mp3", audio_bitrate=AUDIO_BITRATE).run(
-            overwrite_output=True, quiet=True
+            overwrite_output=True, quiet=True,
         )
     except Exception as e:
         logger.warning("Phone effect failed, copying original: %s", e)
@@ -216,7 +321,9 @@ def apply_phone_effect(input_path: str, output_path: str) -> None:
 def download_file(url: str, save_path: str) -> bool:
     """Download a file with a browser-like UA header."""
     try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=30)
+        r = requests.get(
+            url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=30,
+        )
         r.raise_for_status()
         with open(save_path, "wb") as f:
             for chunk in r.iter_content(8192):
@@ -228,7 +335,8 @@ def download_file(url: str, save_path: str) -> bool:
 
 
 def _write_uploaded_to_disk(uploaded_file, dest: str) -> None:
-    """Persist a Streamlit UploadedFile to a real path (for ffmpeg)."""
+    """Persist a Streamlit UploadedFile to a real path for ffmpeg.
+    BUG FIX: original code passed BytesIO directly to ffmpeg.input()."""
     with open(dest, "wb") as f:
         f.write(uploaded_file.getvalue())
 
@@ -243,7 +351,8 @@ def mix_final_audio(
     uploaded_intro,
     uploaded_outro,
 ) -> Optional[Path]:
-    """Combine voiced segments, background music, and intro/outro into one MP3."""
+    """Combine voiced segments, background music, intro/outro into one MP3.
+    BUG FIXES: ramp-up ordering, fallback uses phone-effected segments, removed apad."""
     tmp = Path(tmp_dir)
     inputs = []
 
@@ -263,16 +372,22 @@ def mix_final_audio(
         st.error("No valid audio segments to mix.")
         return None
 
-    # --- Concatenate dialogue segments ---
+    # Concatenate dialogue segments
     if len(inputs) > 1:
         dialogue = ffmpeg.concat(*inputs, v=0, a=1, n=len(inputs))
     else:
         dialogue = inputs[0]
 
-    # CHANGED: removed misplaced apad filter — it was adding trailing silence
     dialogue = dialogue.filter("loudnorm", I=-16, LRA=11, TP=-1.5)
 
-    # --- Background music ---
+    # BUG FIX: Prepend silence BEFORE mixing music (so music plays over the gap)
+    if music_ramp_up and bg_source != "None":
+        silence = ffmpeg.input(
+            "anullsrc=channel_layout=stereo:sample_rate=44100", f="lavfi", t=5,
+        )
+        dialogue = ffmpeg.concat(silence, dialogue, v=0, a=1)
+
+    # THEN mix background music (now covers silence + dialogue)
     if bg_source != "None":
         bg_path = tmp / "bg.mp3"
         if bg_source == "Presets" and selected_bg_url:
@@ -284,14 +399,11 @@ def mix_final_audio(
             bg = ffmpeg.input(str(bg_path))
             bg = bg.filter("aloop", loop=-1, size="2147483647")
             bg = bg.filter("volume", DEFAULT_BG_VOLUME)
-            dialogue = ffmpeg.filter([bg, dialogue], "amix", inputs=2, duration="shortest")
+            dialogue = ffmpeg.filter(
+                [bg, dialogue], "amix", inputs=2, duration="shortest",
+            )
 
-    # --- Music ramp-up (5 s music before dialogue) ---
-    if music_ramp_up and bg_source != "None":
-        silence = ffmpeg.input("anullsrc=channel_layout=stereo:sample_rate=44100", f="lavfi", t=5)
-        dialogue = ffmpeg.concat(silence, dialogue, v=0, a=1)
-
-    # --- Intro / Outro  CHANGED: write to disk first (ffmpeg needs real paths) ---
+    # Intro / Outro — written to disk (ffmpeg needs real file paths)
     if uploaded_intro:
         intro_path = str(tmp / "intro.mp3")
         _write_uploaded_to_disk(uploaded_intro, intro_path)
@@ -302,22 +414,23 @@ def mix_final_audio(
         _write_uploaded_to_disk(uploaded_outro, outro_path)
         dialogue = ffmpeg.concat(dialogue, ffmpeg.input(outro_path), v=0, a=1)
 
-    # --- Render ---
+    # Render final output
     out_path = tmp / "podcast.mp3"
     try:
         ffmpeg.output(dialogue, str(out_path), acodec="mp3", audio_bitrate=AUDIO_BITRATE).run(
-            overwrite_output=True, quiet=True
+            overwrite_output=True, quiet=True,
         )
     except ffmpeg.Error as e:
         stderr = e.stderr.decode(errors="ignore") if e.stderr else "unknown"
-        st.warning(f"Advanced mix failed — falling back to simple concat.\n\n```\n{stderr}\n```")
+        st.warning(f"Advanced mix failed — falling back.\n```\n{stderr}\n```")
         try:
+            # BUG FIX: fallback reuses `inputs` which already includes phone-effected segments
             simple = ffmpeg.concat(*inputs, v=0, a=1, n=len(inputs))
             ffmpeg.output(simple, str(out_path), acodec="mp3", audio_bitrate=AUDIO_BITRATE).run(
-                overwrite_output=True, quiet=True
+                overwrite_output=True, quiet=True,
             )
         except Exception as e2:
-            st.error(f"Simple concat also failed: {e2}")
+            st.error(f"Fallback concat also failed: {e2}")
             return None
 
     return out_path if out_path.exists() else None
@@ -369,14 +482,20 @@ def extract_text_from_files(files, audio_client: Optional[OpenAI] = None) -> str
                 parts.append(raw.decode("utf-8", errors="replace"))
 
             elif name.endswith((".mp3", ".wav", ".m4a", ".mp4", ".webm")):
-                if audio_client:
+                # BUG FIX: check Whisper's 25 MB upload limit before sending
+                if not audio_client:
+                    st.warning(f"OpenAI key required to transcribe {file.name}")
+                elif len(raw) > WHISPER_MAX_BYTES:
+                    st.warning(
+                        f"⚠️ {file.name} is {len(raw) / 1_048_576:.1f} MB — "
+                        f"exceeds Whisper's 25 MB limit. Skipping."
+                    )
+                else:
                     with st.spinner(f"Transcribing {file.name}…"):
                         transcript = audio_client.audio.transcriptions.create(
-                            model="whisper-1", file=(file.name, raw)
+                            model="whisper-1", file=(file.name, raw),
                         )
                         parts.append(transcript.text)
-                else:
-                    st.warning(f"OpenAI key required to transcribe {file.name}")
             else:
                 st.warning(f"Unsupported file type: {file.name}")
         except Exception as e:
@@ -385,14 +504,19 @@ def extract_text_from_files(files, audio_client: Optional[OpenAI] = None) -> str
     return "\n".join(parts)
 
 
-def download_and_transcribe_video(url: str, audio_client: OpenAI) -> Tuple[Optional[str], Optional[str]]:
-    """Download audio from a video URL and transcribe via Whisper."""
+def download_and_transcribe_video(
+    url: str, audio_client: OpenAI,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Download audio from a video URL and transcribe via Whisper.
+    BUG FIX: removed fragile asyncio.new_event_loop() — runs synchronously."""
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             ydl_opts = {
                 "format": "bestaudio/best",
                 "outtmpl": os.path.join(tmp_dir, "audio.%(ext)s"),
-                "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
+                "postprocessors": [
+                    {"key": "FFmpegExtractAudio", "preferredcodec": "mp3"},
+                ],
                 "quiet": True,
                 "http_headers": {"User-Agent": "Mozilla/5.0"},
             }
@@ -401,7 +525,9 @@ def download_and_transcribe_video(url: str, audio_client: OpenAI) -> Tuple[Optio
 
             audio_path = next(Path(tmp_dir).glob("audio.*"))
             with open(audio_path, "rb") as f:
-                transcript = audio_client.audio.transcriptions.create(model="whisper-1", file=f)
+                transcript = audio_client.audio.transcriptions.create(
+                    model="whisper-1", file=f,
+                )
             return transcript.text, None
     except Exception as e:
         return None, str(e)
@@ -413,15 +539,19 @@ def download_and_transcribe_video(url: str, audio_client: OpenAI) -> Tuple[Optio
 with st.sidebar:
     st.title("⚙️ Studio Settings")
 
-    openai_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI API Key", type="password")
-    xai_key = st.secrets.get("XAI_API_KEY") or st.text_input("xAI API Key (Optional)", type="password")
+    openai_key = st.secrets.get("OPENAI_API_KEY") or st.text_input(
+        "OpenAI API Key", type="password",
+    )
+    xai_key = st.secrets.get("XAI_API_KEY") or st.text_input(
+        "xAI API Key (Optional)", type="password",
+    )
 
     model_choice = st.radio("Intelligence Engine", ["Model A (OpenAI)", "Model B (xAI Grok)"])
     xai_version = "Grok 4.1 Fast (Recommended)"
     if model_choice == "Model B (xAI Grok)":
         xai_version = st.selectbox("Grok Model", list(GROK_MODEL_MAP.keys()))
 
-    budget_mode = st.checkbox("💰 Budget Mode (GPT-4o-mini)", help="~90 % cheaper LLM cost")
+    budget_mode = st.checkbox("💰 Budget Mode (GPT-4o-mini)", help="~90% cheaper LLM cost")
     privacy_mode = st.toggle("🔒 Privacy Mode", value=False)
 
     if st.button("🔄 New Session"):
@@ -437,13 +567,29 @@ with st.sidebar:
     st.subheader("🌐 Language & Length")
     language = st.selectbox("Output Language", SUPPORTED_LANGUAGES)
     length_option = st.select_slider(
-        "Duration", list(WORD_TARGETS.keys()), value="Medium (5 min)"
+        "Duration", list(WORD_TARGETS.keys()), value="Medium (5 min)",
     )
 
     st.subheader("🎙️ Hosts")
     host1_persona = st.text_input("Host 1 Persona", "Male, curious, slightly skeptical")
     host2_persona = st.text_input("Host 2 Persona", "Female, enthusiastic expert")
     voice_style = st.selectbox("Voice Pair", list(VOICE_MAP.keys()))
+
+    # NEW FEATURE: Per-speaker speed controls
+    st.caption("Speaking Speed")
+    spd_c1, spd_c2 = st.columns(2)
+    with spd_c1:
+        host1_speed = st.slider("Host 1", 0.70, 1.30, 1.0, 0.05, key="h1_speed")
+    with spd_c2:
+        host2_speed = st.slider("Host 2", 0.70, 1.30, 1.0, 0.05, key="h2_speed")
+    caller_speed = st.slider("Caller", 0.70, 1.30, 0.95, 0.05, key="caller_speed")
+
+    # NEW FEATURE: TTS quality toggle
+    tts_hd = st.checkbox(
+        "🔊 HD Voices (TTS-1-HD)",
+        help="2× TTS cost, noticeably better quality",
+    )
+    tts_model = "tts-1-hd" if tts_hd else "tts-1"
 
     st.divider()
     st.subheader("🎵 Music")
@@ -461,26 +607,74 @@ with st.sidebar:
         uploaded_intro = st.file_uploader("Intro clip", type=["mp3", "wav"])
         uploaded_outro = st.file_uploader("Outro clip", type=["mp3", "wav"])
 
-    # --- Cost estimate ---
+    # NEW FEATURE: Session save / restore
+    st.divider()
+    with st.expander("💾 Session Save / Restore"):
+        if st.session_state.script_data or st.session_state.source_text:
+            session_export = {
+                "script_data": st.session_state.script_data,
+                "source_text": st.session_state.source_text,
+                "chat_history": st.session_state.chat_history,
+                "exported_at": datetime.now().isoformat(),
+            }
+            st.download_button(
+                "⬇️ Download Session",
+                json.dumps(session_export, indent=2, ensure_ascii=False),
+                file_name=f"session_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                mime="application/json",
+            )
+        else:
+            st.caption("Nothing to save yet.")
+
+        uploaded_session = st.file_uploader(
+            "Upload saved session", type=["json"], key="session_upload",
+        )
+        if uploaded_session:
+            try:
+                restored = json.loads(uploaded_session.getvalue().decode("utf-8"))
+                if st.button("✅ Restore Session"):
+                    st.session_state.script_data = restored.get("script_data")
+                    st.session_state.source_text = restored.get("source_text", "")
+                    st.session_state.chat_history = restored.get("chat_history", [])
+                    st.success(
+                        f"Session restored (saved {restored.get('exported_at', 'unknown')})"
+                    )
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Invalid session file: {e}")
+
+    # Cost estimate — updated for HD pricing
     st.divider()
     st.subheader("💵 Cost Estimate")
+    tts_rate = TTS_HD_COST_PER_MILLION_CHARS if tts_hd else TTS_COST_PER_MILLION_CHARS
+
     if st.session_state.script_data:
-        total_chars = sum(len(l["text"]) for l in st.session_state.script_data["dialogue"])
+        total_chars = sum(
+            len(l["text"]) for l in st.session_state.script_data["dialogue"]
+        )
         total_lines = len(st.session_state.script_data["dialogue"])
-        tts_cost = (total_chars / 1_000_000) * TTS_COST_PER_MILLION_CHARS
-        llm_cost = 0.10 if (budget_mode or model_choice == "Model A (OpenAI)") else 0.30
+        tts_cost = (total_chars / 1_000_000) * tts_rate
+        llm_cost = (
+            0.10 if (budget_mode or model_choice == "Model A (OpenAI)") else 0.30
+        )
         c1, c2 = st.columns(2)
         c1.metric("TTS", f"${tts_cost:.3f}")
         c2.metric("LLM", f"${llm_cost:.2f}")
         st.success(f"**Estimated total ≈ ${tts_cost + llm_cost:.2f}**")
-        st.caption(f"{total_lines} lines · {total_chars:,} chars")
+        st.caption(
+            f"{total_lines} lines · {total_chars:,} chars" + (" · HD" if tts_hd else "")
+        )
     else:
-        # CHANGED: show a rough pre-generation estimate
         target_words = WORD_TARGETS[length_option]
-        est_chars = int(target_words * 5.5)  # rough chars-per-word
-        est_tts = (est_chars / 1_000_000) * TTS_COST_PER_MILLION_CHARS
-        est_llm = 0.10 if (budget_mode or model_choice == "Model A (OpenAI)") else 0.30
-        st.info(f"Pre-gen estimate ≈ **${est_tts + est_llm:.2f}** for {length_option}")
+        est_chars = int(target_words * 5.5)
+        est_tts = (est_chars / 1_000_000) * tts_rate
+        est_llm = (
+            0.10 if (budget_mode or model_choice == "Model A (OpenAI)") else 0.30
+        )
+        st.info(
+            f"Pre-gen estimate ≈ **${est_tts + est_llm:.2f}** for {length_option}"
+            + (" · HD" if tts_hd else "")
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -492,12 +686,17 @@ audio_client: Optional[OpenAI] = OpenAI(api_key=openai_key) if openai_key else N
 # Main tabs
 # ---------------------------------------------------------------------------
 st.title("🎧 PodcastLM Studio")
-tab1, tab2, tab3, tab4 = st.tabs(["📄 Source", "💬 Research Chat", "📝 Script & Rehearsal", "🎚️ Produce"])
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["📄 Source", "💬 Research Chat", "📝 Script & Rehearsal", "🎚️ Produce"],
+)
+
 
 # === TAB 1 — SOURCE =========================================================
 with tab1:
     st.info("Upload content — this drives both the research chat and podcast generation.")
-    input_type = st.radio("Input Type", ["Files", "Web URL", "Video URL", "Text"], horizontal=True)
+    input_type = st.radio(
+        "Input Type", ["Files", "Web URL", "Video URL", "Text"], horizontal=True,
+    )
     new_text = ""
 
     if input_type == "Files":
@@ -523,7 +722,6 @@ with tab1:
                 st.error("OpenAI key required for transcription.")
             else:
                 with st.spinner("Downloading & transcribing video…"):
-                    # CHANGED: no more asyncio.new_event_loop() — just call synchronously
                     text, err = download_and_transcribe_video(vid_url, audio_client)
                     if err:
                         st.error(f"Transcription error: {err}")
@@ -540,10 +738,16 @@ with tab1:
         )
         st.success(f"✅ Source loaded — {len(new_text):,} characters.")
 
-    # CHANGED: show a preview of loaded source
     if st.session_state.source_text:
-        with st.expander(f"📖 Current source ({len(st.session_state.source_text):,} chars)", expanded=False):
-            st.text(st.session_state.source_text[:2000] + ("…" if len(st.session_state.source_text) > 2000 else ""))
+        with st.expander(
+            f"📖 Current source ({len(st.session_state.source_text):,} chars)",
+            expanded=False,
+        ):
+            preview = st.session_state.source_text[:2000]
+            if len(st.session_state.source_text) > 2000:
+                preview += "…"
+            st.text(preview)
+
 
 # === TAB 2 — RESEARCH CHAT ==================================================
 with tab2:
@@ -551,40 +755,51 @@ with tab2:
     if not st.session_state.source_text:
         st.info("Load source content in the **Source** tab first.")
     else:
-        # Render full chat history
         for entry in st.session_state.chat_history:
             role = "user" if entry["role"] == "user" else "assistant"
             with st.chat_message(role):
                 st.markdown(entry["content"])
 
-        # CHANGED: use st.chat_input for a cleaner UX
         user_question = st.chat_input("Ask about the source material…")
         if user_question:
-            st.session_state.chat_history.append({"role": "user", "content": user_question})
+            st.session_state.chat_history.append(
+                {"role": "user", "content": user_question},
+            )
             with st.chat_message("user"):
                 st.markdown(user_question)
 
-            client, model, err = get_llm_client(model_choice, xai_version, openai_key, xai_key, budget_mode)
+            client, model, err = get_llm_client(
+                model_choice, xai_version, openai_key, xai_key, budget_mode,
+            )
             if err:
                 st.error(err)
             else:
                 messages = [
-                    {"role": "system", "content": (
-                        "You are a helpful research assistant. Answer questions using ONLY "
-                        "the provided source material. If the answer isn't in the source, say so."
-                    )},
-                    {"role": "system", "content": f"Source:\n{st.session_state.source_text[:MAX_SOURCE_CHARS]}"},
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a helpful research assistant. Answer questions using "
+                            "ONLY the provided source material. If the answer isn't in the "
+                            "source, say so."
+                        ),
+                    },
+                    {
+                        "role": "system",
+                        "content": f"Source:\n{smart_truncate(st.session_state.source_text)}",
+                    },
                     *st.session_state.chat_history,
                 ]
                 with st.chat_message("assistant"):
                     with st.spinner("Thinking…"):
                         try:
                             response = client.chat.completions.create(
-                                model=model, messages=messages, max_tokens=1024
+                                model=model, messages=messages, max_tokens=1024,
                             )
                             ai_reply = response.choices[0].message.content
                             st.markdown(ai_reply)
-                            st.session_state.chat_history.append({"role": "assistant", "content": ai_reply})
+                            st.session_state.chat_history.append(
+                                {"role": "assistant", "content": ai_reply},
+                            )
                         except Exception as e:
                             st.error(f"LLM error: {e}")
 
@@ -592,85 +807,135 @@ with tab2:
             st.session_state.chat_history = []
             st.rerun()
 
+
 # === TAB 3 — SCRIPT GENERATION & REHEARSAL ===================================
 with tab3:
     col_dir, col_call = st.columns(2)
     with col_dir:
-        user_instructions = st.text_area("🎬 Director Notes", placeholder="e.g., Make it funny, focus on the key findings")
+        user_instructions = st.text_area(
+            "🎬 Director Notes",
+            placeholder="e.g., Make it funny, focus on the key findings",
+        )
     with col_call:
-        caller_prompt = st.text_area("📞 Caller Question (optional)", placeholder="e.g., What does this mean for everyday people?")
+        caller_prompt = st.text_area(
+            "📞 Caller Question (optional)",
+            placeholder="e.g., What does this mean for everyday people?",
+        )
 
     if st.button("✨ Generate Script", type="primary"):
         if not st.session_state.source_text:
             st.error("Load source content first (Tab 1).")
         else:
-            client, model, err = get_llm_client(model_choice, xai_version, openai_key, xai_key, budget_mode)
+            client, model, err = get_llm_client(
+                model_choice, xai_version, openai_key, xai_key, budget_mode,
+            )
             if err:
                 st.error(err)
             else:
                 with st.spinner("Writing script… this may take 30–90 seconds."):
                     target_words = WORD_TARGETS[length_option]
-
-                    # CHANGED: use dedicated OpenAI client for translation
-                    translated = translate_if_needed(user_instructions, language, openai_key)
-
-                    call_in = (
-                        f'\nInclude a "Caller" speaker who asks: \'{caller_prompt}\' — '
-                        f"the hosts then respond thoughtfully."
-                        if caller_prompt else ""
+                    translated = translate_if_needed(
+                        user_instructions, language, openai_key,
                     )
+
+                    call_in = ""
+                    if caller_prompt:
+                        call_in = (
+                            f'\nInclude a "Caller" speaker who asks: \'{caller_prompt}\' '
+                            f"— the hosts then respond thoughtfully."
+                        )
+
+                    source_text = smart_truncate(st.session_state.source_text)
 
                     prompt = f"""Create a podcast script in {language}.
 
 Host 1 persona: {host1_persona}
 Host 2 persona: {host2_persona}
 
-Write a very detailed, natural, conversational podcast script with approximately {target_words} total words ({length_option}).
-Use long explanations, tangents, humor, and back-and-forth dialogue. NEVER truncate or summarize lines.
+Write a very detailed, natural, conversational podcast script with approximately \
+{target_words} total words ({length_option}).
+Use long explanations, tangents, humor, and back-and-forth dialogue. \
+NEVER truncate or summarize lines.
 
 Director notes: {translated}
 {call_in}
 
 Output **strict JSON only** — no markdown fences:
-{{"title": "...", "dialogue": [{{"speaker": "Host 1", "text": "..."}}, {{"speaker": "Host 2", "text": "..."}}, ...]}}
+{{"title": "...", "dialogue": [{{"speaker": "Host 1", "text": "..."}}, \
+{{"speaker": "Host 2", "text": "..."}}, ...]}}
 
 Source material:
-{st.session_state.source_text[:MAX_SOURCE_CHARS]}"""
+{source_text}"""
 
                     try:
-                        res = client.chat.completions.create(
-                            model=model,
-                            messages=[{"role": "user", "content": prompt}],
-                            response_format={"type": "json_object"},
-                        )
+                        # BUG FIX: only request json_object for models that support it
+                        kwargs: Dict[str, Any] = {
+                            "model": model,
+                            "messages": [{"role": "user", "content": prompt}],
+                        }
+                        if any(model.startswith(p) for p in JSON_MODE_PREFIXES):
+                            kwargs["response_format"] = {"type": "json_object"}
+
+                        res = client.chat.completions.create(**kwargs)
                         raw = res.choices[0].message.content
 
-                        # CHANGED: robust JSON parsing — strip markdown fences if model ignores instruction
+                        # Robust JSON parsing — strip markdown fences if present
                         cleaned = raw.strip()
                         if cleaned.startswith("```"):
                             cleaned = cleaned.split("\n", 1)[1]
                         if cleaned.endswith("```"):
                             cleaned = cleaned.rsplit("```", 1)[0]
 
-                        st.session_state.script_data = json.loads(cleaned)
+                        st.session_state.script_data = json.loads(cleaned.strip())
                         st.success("✅ Script generated!")
 
                         if privacy_mode:
                             st.session_state.source_text = ""
                             st.info("🔒 Source text wiped (Privacy Mode).")
+
                     except json.JSONDecodeError as e:
-                        st.error(f"Script JSON parsing failed: {e}\n\nRaw output:\n```\n{raw[:500]}\n```")
+                        st.error(
+                            f"Script JSON parsing failed: {e}\n\n"
+                            f"Raw output:\n```\n{raw[:500]}\n```"
+                        )
                     except Exception as e:
                         st.error(f"Script generation failed: {e}")
 
-    # --- Display & edit script ---
+    # --- Display, edit, export script ---
     if st.session_state.script_data:
         data = st.session_state.script_data
         dialogue = data.get("dialogue", [])
         word_count = sum(len(l["text"].split()) for l in dialogue)
 
         st.subheader(data.get("title", "Untitled Podcast"))
-        st.caption(f"{len(dialogue)} lines · ~{word_count:,} words · est. {word_count // 150} min")
+        st.caption(
+            f"{len(dialogue)} lines · ~{word_count:,} words · "
+            f"est. {word_count // 150} min"
+        )
+
+        # NEW FEATURE: Script export buttons
+        exp_c1, exp_c2, exp_c3 = st.columns(3)
+        with exp_c1:
+            st.download_button(
+                "📄 Export Markdown",
+                export_script_markdown(data),
+                file_name=f"script_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                mime="text/markdown",
+            )
+        with exp_c2:
+            st.download_button(
+                "📝 Export Plain Text",
+                export_script_plain(data),
+                file_name=f"script_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                mime="text/plain",
+            )
+        with exp_c3:
+            st.download_button(
+                "🎬 Export SRT Subtitles",
+                generate_srt(dialogue),
+                file_name=f"subtitles_{datetime.now().strftime('%Y%m%d_%H%M')}.srt",
+                mime="text/srt",
+            )
 
         with st.expander("✏️ Edit Script", expanded=False):
             with st.form("edit_form"):
@@ -681,8 +946,13 @@ Source material:
                 for i, line in enumerate(dialogue):
                     c1, c2 = st.columns([1, 5])
                     sp = c1.selectbox(
-                        "Speaker", speakers,
-                        index=speakers.index(line["speaker"]) if line["speaker"] in speakers else 0,
+                        "Speaker",
+                        speakers,
+                        index=(
+                            speakers.index(line["speaker"])
+                            if line["speaker"] in speakers
+                            else 0
+                        ),
                         key=f"sp_{i}",
                     )
                     tx = c2.text_area("Line", line["text"], height=80, key=f"tx_{i}")
@@ -693,12 +963,14 @@ Source material:
                     st.success("Saved.")
                     st.rerun()
 
-        # --- Rehearsal ---
+        # --- Rehearsal (uses correct TTS model and per-speaker speed) ---
         st.subheader("🎧 Live Rehearsal")
         idx = st.selectbox(
             "Preview a line",
             range(len(dialogue)),
-            format_func=lambda i: f"[{dialogue[i]['speaker']}] {dialogue[i]['text'][:80]}…",
+            format_func=lambda i: (
+                f"[{dialogue[i]['speaker']}] {dialogue[i]['text'][:80]}…"
+            ),
         )
         if st.button("▶️ Play Line"):
             if not audio_client:
@@ -707,13 +979,19 @@ Source material:
                 line = dialogue[idx]
                 m_voice, f_voice = VOICE_MAP[voice_style]
                 voice = m_voice if line["speaker"] == "Host 1" else f_voice
+                speed = host1_speed if line["speaker"] == "Host 1" else host2_speed
                 if line["speaker"] == "Caller":
                     voice = "fable"
+                    speed = caller_speed
                 with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-                    if generate_tts(audio_client, line["text"], voice, tmp.name):
+                    if generate_tts(
+                        audio_client, line["text"], voice, tmp.name,
+                        tts_model=tts_model, speed=speed,
+                    ):
                         st.audio(tmp.name)
                     else:
                         st.error("TTS preview failed.")
+
 
 # === TAB 4 — PRODUCTION =====================================================
 with tab4:
@@ -721,6 +999,7 @@ with tab4:
 
     if not st.session_state.script_data:
         st.info("Generate a script in the **Script & Rehearsal** tab first.")
+
     elif st.button("🚀 Produce Final Podcast", type="primary"):
         if not openai_key:
             st.error("OpenAI key required for TTS production.")
@@ -735,28 +1014,35 @@ with tab4:
             tmp = Path(tmp_dir)
             script = st.session_state.script_data["dialogue"]
 
-            # --- CHANGED: parallel TTS generation ---
-            def _voice_line(i_line):
-                i, line = i_line
-                voice = m_voice if line["speaker"] == "Host 1" else f_voice
-                if line["speaker"] == "Caller":
-                    voice = "fable"
-                path = str(tmp / f"{i}.mp3")
-                ok = generate_tts(tts_client, line["text"], voice, path)
-                return i, ok
+            # --- Parallel TTS (thread-safe: errors collected, not printed) ---
+            args_list = [
+                (
+                    i, line, tts_client, m_voice, f_voice, tmp,
+                    tts_model, host1_speed, host2_speed, caller_speed,
+                )
+                for i, line in enumerate(script)
+            ]
 
+            tts_errors: List[str] = []
             completed = 0
+
             with ThreadPoolExecutor(max_workers=MAX_TTS_WORKERS) as pool:
-                futures = {pool.submit(_voice_line, (i, line)): i for i, line in enumerate(script)}
+                futures = {
+                    pool.submit(_voice_line_worker, a): a[0] for a in args_list
+                }
                 for future in as_completed(futures):
-                    i, ok = future.result()
+                    i, ok, err_msg = future.result()
                     completed += 1
                     progress.progress(
                         completed / len(script),
                         text=f"Voicing line {completed}/{len(script)}…",
                     )
                     if not ok:
-                        st.warning(f"Line {i} failed — may be missing from final output.")
+                        tts_errors.append(f"Line {i}: {err_msg}")
+
+            # Show TTS errors on main thread (thread-safe)
+            for err in tts_errors:
+                st.warning(err)
 
             status.text("🎛️ Mixing final podcast…")
             out_path = mix_final_audio(
@@ -767,17 +1053,33 @@ with tab4:
             if out_path and out_path.exists():
                 with open(out_path, "rb") as f:
                     audio_bytes = f.read()
+
                 progress.progress(1.0, text="✅ Complete!")
                 status.empty()
                 st.audio(audio_bytes, format="audio/mp3")
-                st.download_button(
-                    "⬇️ Download Podcast",
-                    audio_bytes,
-                    file_name=f"podcast_{datetime.now().strftime('%Y%m%d_%H%M')}.mp3",
-                    mime="audio/mp3",
-                )
-                # CHANGED: show final stats
+
+                # Download row: podcast + subtitles
+                dl_c1, dl_c2 = st.columns(2)
+                with dl_c1:
+                    st.download_button(
+                        "⬇️ Download Podcast",
+                        audio_bytes,
+                        file_name=f"podcast_{datetime.now().strftime('%Y%m%d_%H%M')}.mp3",
+                        mime="audio/mp3",
+                    )
+                with dl_c2:
+                    st.download_button(
+                        "🎬 Download Subtitles",
+                        generate_srt(script),
+                        file_name=f"podcast_{datetime.now().strftime('%Y%m%d_%H%M')}.srt",
+                        mime="text/srt",
+                    )
+
                 duration_est = sum(len(l["text"].split()) for l in script) / 150
-                st.success(f"🎉 Done! ~{duration_est:.0f} min · {len(audio_bytes) / 1_048_576:.1f} MB")
+                size_mb = len(audio_bytes) / 1_048_576
+                st.success(
+                    f"🎉 Done! ~{duration_est:.0f} min · {size_mb:.1f} MB"
+                    + (" · HD audio" if tts_hd else "")
+                )
             else:
                 st.error("Production failed — check warnings above.")
