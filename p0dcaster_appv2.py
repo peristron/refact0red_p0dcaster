@@ -2,13 +2,14 @@
 PodcastLM Studio v2 — AI-powered podcast generator.
 Bug fixes: thread-safe TTS, music ramp-up ordering, Whisper size check,
 JSON mode fallback, smart truncation, fallback concat integrity.
-New features: HD TTS, per-speaker speed, script export, session save/restore,
-SRT subtitles, DeepSeek as default LLM, truncation recovery.
+Features: HD TTS, Edge TTS (free), per-speaker speed, script export,
+session save/restore, SRT subtitles, DeepSeek as default LLM, truncation recovery.
 """
 
 import streamlit as st
 import os
 import re
+import asyncio
 import tempfile
 import json
 import requests
@@ -27,6 +28,7 @@ from pptx import Presentation
 from bs4 import BeautifulSoup
 import yt_dlp
 import ffmpeg
+import edge_tts
 from openai import OpenAI
 
 # ---------------------------------------------------------------------------
@@ -51,6 +53,31 @@ VOICE_MAP = {
     "Dynamic (Alloy & Nova)": ("alloy", "nova"),
     "Calm (Onyx & Shimmer)": ("onyx", "shimmer"),
     "Formal (Echo & Fable)": ("echo", "fable"),
+}
+
+# Edge TTS voices per language: (Host 1 male, Host 2 female, Caller)
+EDGE_LANGUAGE_VOICES = {
+    "English (US)": ("en-US-GuyNeural", "en-US-JennyNeural", "en-US-DavisNeural"),
+    "English (UK)": ("en-GB-RyanNeural", "en-GB-SoniaNeural", "en-GB-ThomasNeural"),
+    "Spanish": ("es-ES-AlvaroNeural", "es-ES-ElviraNeural", "es-MX-JorgeNeural"),
+    "French": ("fr-FR-HenriNeural", "fr-FR-DeniseNeural", "fr-FR-YvesNeural"),
+    "German": ("de-DE-ConradNeural", "de-DE-KatjaNeural", "de-DE-KillianNeural"),
+    "Italian": ("it-IT-DiegoNeural", "it-IT-ElsaNeural", "it-IT-GiuseppeNeural"),
+    "Portuguese": ("pt-BR-AntonioNeural", "pt-BR-FranciscaNeural", "pt-BR-ValerioNeural"),
+    "Hindi": ("hi-IN-MadhurNeural", "hi-IN-SwaraNeural", "hi-IN-MadhurNeural"),
+    "Urdu": ("ur-PK-AsadNeural", "ur-PK-UzmaNeural", "ur-PK-AsadNeural"),
+    "Arabic": ("ar-SA-HamedNeural", "ar-SA-ZariyahNeural", "ar-EG-ShakirNeural"),
+    "Hebrew": ("he-IL-AvriNeural", "he-IL-HilaNeural", "he-IL-AvriNeural"),
+    "Russian": ("ru-RU-DmitryNeural", "ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural"),
+    "Turkish": ("tr-TR-AhmetNeural", "tr-TR-EmelNeural", "tr-TR-AhmetNeural"),
+    "Japanese": ("ja-JP-KeitaNeural", "ja-JP-NanamiNeural", "ja-JP-KeitaNeural"),
+    "Korean": ("ko-KR-InJoonNeural", "ko-KR-SunHiNeural", "ko-KR-InJoonNeural"),
+    "Chinese (Mandarin)": ("zh-CN-YunxiNeural", "zh-CN-XiaoxiaoNeural", "zh-CN-YunjianNeural"),
+    "Polish": ("pl-PL-MarekNeural", "pl-PL-ZofiaNeural", "pl-PL-MarekNeural"),
+    "Dutch": ("nl-NL-MaartenNeural", "nl-NL-ColetteNeural", "nl-NL-MaartenNeural"),
+    "Swedish": ("sv-SE-MattiasNeural", "sv-SE-SofieNeural", "sv-SE-MattiasNeural"),
+    "Indonesian": ("id-ID-ArdiNeural", "id-ID-GadisNeural", "id-ID-ArdiNeural"),
+    "Thai": ("th-TH-NiwatNeural", "th-TH-PremwadeeNeural", "th-TH-NiwatNeural"),
 }
 
 MUSIC_URLS = {
@@ -84,18 +111,14 @@ GROK_MODEL_MAP = {
     "Grok Code Fast": "grok-code-fast-1",
 }
 
-# Models known to support response_format={"type": "json_object"}
-# DeepSeek-V3 (deepseek-chat) supports it; R1 (deepseek-reasoner) does NOT
 JSON_MODE_PREFIXES = ("gpt-", "grok-4-1", "deepseek-chat")
 
-# Output token budget per script length
-# DeepSeek-V3 caps at 8,192; GPT-4o-mini caps at 16,384; Grok varies
 MODEL_MAX_TOKENS = {
     "deepseek-chat": 8_192,
     "deepseek-reasoner": 8_192,
     "gpt-4o-mini": 16_384,
 }
-DEFAULT_MODEL_MAX = 8_192  # safe fallback
+DEFAULT_MODEL_MAX = 8_192
 
 MAX_OUTPUT_TOKENS = {
     "Short (2 min)": 2_048,
@@ -104,7 +127,6 @@ MAX_OUTPUT_TOKENS = {
     "Extra Long (30 min)": 8_192,
 }
 
-# Scale source input to leave room for output
 SOURCE_CHARS_BY_LENGTH = {
     "Short (2 min)": 15_000,
     "Medium (5 min)": 30_000,
@@ -125,7 +147,7 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Session state — timestamp captured once, not on every rerun
+# Session state
 # ---------------------------------------------------------------------------
 if "session_start" not in st.session_state:
     st.session_state.session_start = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -151,7 +173,7 @@ if not st.session_state.notebook_content:
 
 
 # ---------------------------------------------------------------------------
-# Authentication — timing-safe comparison
+# Authentication
 # ---------------------------------------------------------------------------
 def check_password() -> None:
     entered = st.session_state.get("password_input", "")
@@ -186,23 +208,35 @@ def smart_truncate(text: str, max_chars: int = MAX_SOURCE_CHARS) -> str:
     return truncated
 
 
-def repair_truncated_json(raw: str) -> Optional[Dict]:
-    """Attempt to salvage a usable script from truncated LLM JSON output.
+def _safe_line(line: Dict) -> Tuple[str, str]:
+    """Extract speaker and text from a dialogue line, handling key variations."""
+    speaker = (
+        line.get("speaker")
+        or line.get("Speaker")
+        or line.get("SPEAKER")
+        or "Unknown"
+    )
+    text = (
+        line.get("text")
+        or line.get("Text")
+        or line.get("TEXT")
+        or line.get("content")
+        or line.get("line")
+        or ""
+    )
+    return speaker, text
 
-    Uses regex to extract all fully-complete dialogue entries,
-    then rebuilds the JSON structure. Returns None if nothing salvageable.
-    """
-    # Try parsing as-is first (maybe it's fine)
+
+def repair_truncated_json(raw: str) -> Optional[Dict]:
+    """Salvage usable script from truncated LLM JSON output."""
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
 
-    # Extract title
     title_match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
     title = title_match.group(1) if title_match else "Untitled Podcast"
 
-    # Find all COMPLETE {"speaker": "...", "text": "..."} entries
     pattern = r'\{\s*"speaker"\s*:\s*"([^"]*)"\s*,\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}'
     matches = re.findall(pattern, raw, re.DOTALL)
 
@@ -211,7 +245,6 @@ def repair_truncated_json(raw: str) -> Optional[Dict]:
 
     dialogue = []
     for speaker, text in matches:
-        # Unescape JSON string escapes (e.g., \" \n \t)
         try:
             unescaped = json.loads(f'"{text}"')
         except (json.JSONDecodeError, ValueError):
@@ -254,25 +287,6 @@ def generate_srt(dialogue: List[Dict], words_per_minute: float = 150.0) -> str:
         current_time += duration + 0.5
 
     return "\n".join(srt_parts)
-
-
-def _safe_line(line: Dict) -> Tuple[str, str]:
-    """Extract speaker and text from a dialogue line, handling key variations."""
-    speaker = (
-        line.get("speaker")
-        or line.get("Speaker")
-        or line.get("SPEAKER")
-        or "Unknown"
-    )
-    text = (
-        line.get("text")
-        or line.get("Text")
-        or line.get("TEXT")
-        or line.get("content")
-        or line.get("line")
-        or ""
-    )
-    return speaker, text
 
 
 def export_script_markdown(data: Dict) -> str:
@@ -329,8 +343,7 @@ def get_llm_client(
 
 
 def translate_if_needed(text: str, target_lang: str, openai_key: str) -> str:
-    """Translate director notes via a dedicated OpenAI client (never xAI/DeepSeek).
-    Uses gpt-4o-mini which only exists on OpenAI's endpoint."""
+    """Translate director notes via a dedicated OpenAI client."""
     if not any(lang in target_lang for lang in NON_ENGLISH_LANGS):
         return text
     if not openai_key:
@@ -350,13 +363,36 @@ def translate_if_needed(text: str, target_lang: str, openai_key: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Audio helpers
+# Audio helpers — Edge TTS
+# ---------------------------------------------------------------------------
+def _sync_edge_tts(text: str, voice: str, filepath: str, speed: float = 1.0) -> bool:
+    """Synchronous wrapper for edge-tts. Safe in main thread and worker threads."""
+    try:
+        rate_str = f"{int((speed - 1) * 100):+d}%"
+        communicate = edge_tts.Communicate(text, voice, rate=rate_str)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(communicate.save(filepath))
+        finally:
+            loop.close()
+        p = Path(filepath)
+        return p.exists() and p.stat().st_size > 0
+    except Exception as e:
+        logger.error("Edge TTS failed for voice %s: %s", voice, e)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Audio helpers — OpenAI TTS
 # ---------------------------------------------------------------------------
 def generate_tts(
-    client: OpenAI, text: str, voice: str, filepath: str,
-    tts_model: str = "tts-1", speed: float = 1.0,
+    client: Optional[OpenAI], text: str, voice: str, filepath: str,
+    tts_model: str = "tts-1", speed: float = 1.0, use_edge: bool = False,
 ) -> bool:
     """Generate a single TTS segment (main-thread only). Returns True on success."""
+    if use_edge:
+        return _sync_edge_tts(text, voice, filepath, speed)
     try:
         response = client.audio.speech.create(
             model=tts_model, voice=voice, input=text, speed=speed,
@@ -371,30 +407,40 @@ def generate_tts(
 
 
 def _voice_line_worker(args: tuple) -> Tuple[int, bool, Optional[str]]:
-    """Thread-safe TTS worker — NO Streamlit calls allowed here."""
-    (i, line, tts_client, m_voice, f_voice, tmp_path,
-     tts_model, h1_speed, h2_speed, c_speed) = args
+    """Thread-safe TTS worker — NO Streamlit calls allowed here.
+    Supports both OpenAI and Edge TTS."""
+    (i, line, tts_client, m_voice, f_voice, c_voice, tmp_path,
+     tts_model_name, h1_speed, h2_speed, c_speed, use_edge) = args
 
     voice = m_voice if line["speaker"] == "Host 1" else f_voice
     speed = h1_speed if line["speaker"] == "Host 1" else h2_speed
     if line["speaker"] == "Caller":
-        voice = "fable"
+        voice = c_voice
         speed = c_speed
 
     path = str(tmp_path / f"{i}.mp3")
+
     try:
-        response = tts_client.audio.speech.create(
-            model=tts_model, voice=voice, input=line["text"], speed=speed,
-        )
-        response.stream_to_file(path)
-        p = Path(path)
-        if p.exists() and p.stat().st_size > 0:
+        if use_edge:
+            ok = _sync_edge_tts(line["text"], voice, path, speed)
+        else:
+            response = tts_client.audio.speech.create(
+                model=tts_model_name, voice=voice, input=line["text"], speed=speed,
+            )
+            response.stream_to_file(path)
+            p = Path(path)
+            ok = p.exists() and p.stat().st_size > 0
+
+        if ok:
             return i, True, None
         return i, False, f"Empty audio file for line {i}"
     except Exception as e:
         return i, False, str(e)
 
 
+# ---------------------------------------------------------------------------
+# Audio helpers — effects and mixing
+# ---------------------------------------------------------------------------
 def apply_phone_effect(input_path: str, output_path: str) -> None:
     """Bandpass + echo to simulate a phone caller."""
     try:
@@ -469,7 +515,6 @@ def mix_final_audio(
         st.error("No valid audio segments to mix.")
         return None
 
-    # Concatenate dialogue segments
     if len(inputs) > 1:
         dialogue = ffmpeg.concat(*inputs, v=0, a=1, n=len(inputs))
     else:
@@ -477,14 +522,12 @@ def mix_final_audio(
 
     dialogue = dialogue.filter("loudnorm", I=-16, LRA=11, TP=-1.5)
 
-    # Prepend silence BEFORE mixing music (so music plays over the gap)
     if music_ramp_up and bg_source != "None":
         silence = ffmpeg.input(
             "anullsrc=channel_layout=stereo:sample_rate=44100", f="lavfi", t=5,
         )
         dialogue = ffmpeg.concat(silence, dialogue, v=0, a=1)
 
-    # THEN mix background music (now covers silence + dialogue)
     if bg_source != "None":
         bg_path = tmp / "bg.mp3"
         if bg_source == "Presets" and selected_bg_url:
@@ -500,7 +543,6 @@ def mix_final_audio(
                 [bg, dialogue], "amix", inputs=2, duration="shortest",
             )
 
-    # Intro / Outro — written to disk (ffmpeg needs real file paths)
     if uploaded_intro:
         intro_path = str(tmp / "intro.mp3")
         _write_uploaded_to_disk(uploaded_intro, intro_path)
@@ -511,7 +553,6 @@ def mix_final_audio(
         _write_uploaded_to_disk(uploaded_outro, outro_path)
         dialogue = ffmpeg.concat(dialogue, ffmpeg.input(outro_path), v=0, a=1)
 
-    # Render final output
     out_path = tmp / "podcast.mp3"
     try:
         ffmpeg.output(dialogue, str(out_path), acodec="mp3", audio_bitrate=AUDIO_BITRATE).run(
@@ -677,12 +718,46 @@ with st.sidebar:
         "Duration", list(WORD_TARGETS.keys()), value="Medium (5 min)",
     )
 
-    st.subheader("🎙️ Hosts")
-    host1_persona = st.text_input("Host 1 Persona", "Male, curious, slightly skeptical")
-    host2_persona = st.text_input("Host 2 Persona", "Female, enthusiastic expert")
-    voice_style = st.selectbox("Voice Pair", list(VOICE_MAP.keys()))
+    # --- TTS Provider & Voice Selection ---
+    st.divider()
+    st.subheader("🎙️ Voices")
+    tts_provider = st.radio(
+        "TTS Provider",
+        ["OpenAI", "Edge TTS (Free)"],
+        horizontal=True,
+        help="Edge TTS uses Microsoft's neural voices — completely free, no API key needed",
+    )
 
-    # Per-speaker speed controls
+    use_edge = tts_provider == "Edge TTS (Free)"
+
+    if not use_edge:
+        # OpenAI voice selection
+        voice_style = st.selectbox("Voice Pair", list(VOICE_MAP.keys()))
+        m_voice, f_voice = VOICE_MAP[voice_style]
+        c_voice = "fable"
+
+        tts_hd = st.checkbox(
+            "🔊 HD Voices (TTS-1-HD)",
+            help="2× TTS cost, noticeably better quality",
+        )
+        tts_model = "tts-1-hd" if tts_hd else "tts-1"
+    else:
+        # Edge TTS — voices auto-selected by language
+        edge_voices = EDGE_LANGUAGE_VOICES.get(
+            language, EDGE_LANGUAGE_VOICES["English (US)"],
+        )
+        m_voice, f_voice, c_voice = edge_voices
+        tts_model = "edge"
+        tts_hd = False
+
+        st.success("🆓 Free — no TTS charges")
+        st.caption(f"Voices auto-matched for **{language}**:")
+        st.caption(f"🗣️ Host 1: `{m_voice}`")
+        st.caption(f"🗣️ Host 2: `{f_voice}`")
+        if c_voice != m_voice:
+            st.caption(f"📞 Caller: `{c_voice}`")
+
+    # Per-speaker speed (works for both providers)
     st.caption("Speaking Speed")
     spd_c1, spd_c2 = st.columns(2)
     with spd_c1:
@@ -691,12 +766,9 @@ with st.sidebar:
         host2_speed = st.slider("Host 2", 0.70, 1.30, 1.0, 0.05, key="h2_speed")
     caller_speed = st.slider("Caller", 0.70, 1.30, 0.95, 0.05, key="caller_speed")
 
-    # TTS quality toggle
-    tts_hd = st.checkbox(
-        "🔊 HD Voices (TTS-1-HD)",
-        help="2× TTS cost, noticeably better quality",
-    )
-    tts_model = "tts-1-hd" if tts_hd else "tts-1"
+    st.subheader("🎙️ Hosts")
+    host1_persona = st.text_input("Host 1 Persona", "Male, curious, slightly skeptical")
+    host2_persona = st.text_input("Host 2 Persona", "Female, enthusiastic expert")
 
     st.divider()
     st.subheader("🎵 Music")
@@ -750,13 +822,16 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Invalid session file: {e}")
 
-    # Cost estimate — accounts for DeepSeek, OpenAI, Grok, and HD pricing
+    # --- Cost estimate ---
     st.divider()
     st.subheader("💵 Cost Estimate")
-    tts_rate = TTS_HD_COST_PER_MILLION_CHARS if tts_hd else TTS_COST_PER_MILLION_CHARS
+
+    if use_edge:
+        tts_rate = 0.0
+    else:
+        tts_rate = TTS_HD_COST_PER_MILLION_CHARS if tts_hd else TTS_COST_PER_MILLION_CHARS
 
     def _get_llm_cost() -> float:
-        """Return estimated LLM cost based on current model selection."""
         if budget_mode or model_choice == "Model B (OpenAI)":
             return 0.10
         elif model_choice == "Model A (DeepSeek) ⭐":
@@ -772,29 +847,31 @@ with st.sidebar:
         tts_cost = (total_chars / 1_000_000) * tts_rate
         llm_cost = _get_llm_cost()
         c1, c2 = st.columns(2)
-        c1.metric("TTS", f"${tts_cost:.3f}")
+        c1.metric("TTS", f"${tts_cost:.3f}" if not use_edge else "FREE")
         c2.metric("LLM", f"${llm_cost:.2f}")
         st.success(f"**Estimated total ≈ ${tts_cost + llm_cost:.2f}**")
         st.caption(
             f"{total_lines} lines · {total_chars:,} chars"
             + (" · HD" if tts_hd else "")
+            + (" · Edge TTS" if use_edge else "")
         )
     else:
         target_words = WORD_TARGETS[length_option]
         est_chars = int(target_words * 5.5)
         est_tts = (est_chars / 1_000_000) * tts_rate
         est_llm = _get_llm_cost()
-        st.info(
-            f"Pre-gen estimate ≈ **${est_tts + est_llm:.2f}** for {length_option}"
-            + (" · HD" if tts_hd else "")
-        )
+        label = f"Pre-gen estimate ≈ **${est_tts + est_llm:.2f}** for {length_option}"
+        if use_edge:
+            label += " · **TTS is free**"
+        elif tts_hd:
+            label += " · HD"
+        st.info(label)
 
 
 # ---------------------------------------------------------------------------
-# Helper to resolve the correct specific_model_name for get_llm_client
+# Helper to resolve the correct specific_model_name
 # ---------------------------------------------------------------------------
 def _resolve_model_name() -> str:
-    """Return the correct sub-model name based on current model_choice."""
     if model_choice == "Model A (DeepSeek) ⭐":
         return deepseek_version
     elif model_choice == "Model C (xAI Grok)":
@@ -804,7 +881,7 @@ def _resolve_model_name() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Shared client (for TTS / Whisper — always OpenAI)
+# Shared OpenAI client (for Whisper transcription — always OpenAI)
 # ---------------------------------------------------------------------------
 audio_client: Optional[OpenAI] = OpenAI(api_key=openai_key) if openai_key else None
 
@@ -973,7 +1050,6 @@ with tab3:
                             f"— the hosts then respond thoughtfully."
                         )
 
-                    # Scale source length to leave output room
                     source_limit = SOURCE_CHARS_BY_LENGTH.get(length_option, MAX_SOURCE_CHARS)
                     source_text = smart_truncate(
                         st.session_state.source_text, max_chars=source_limit,
@@ -1000,7 +1076,6 @@ Source material:
 {source_text}"""
 
                     try:
-                        # Clamp max_tokens to model's actual limit
                         desired_tokens = MAX_OUTPUT_TOKENS.get(length_option, 4_096)
                         model_cap = MODEL_MAX_TOKENS.get(model, DEFAULT_MODEL_MAX)
                         safe_tokens = min(desired_tokens, model_cap)
@@ -1010,18 +1085,15 @@ Source material:
                             "messages": [{"role": "user", "content": prompt}],
                             "max_tokens": safe_tokens,
                         }
-                        # Only request json_object for models that support it
                         if any(model.startswith(p) for p in JSON_MODE_PREFIXES):
                             kwargs["response_format"] = {"type": "json_object"}
 
                         res = client.chat.completions.create(**kwargs)
                         raw = res.choices[0].message.content
 
-                        # Check if output was truncated
                         finish_reason = getattr(res.choices[0], "finish_reason", "stop")
                         was_truncated = finish_reason in ("length", "max_tokens")
 
-                        # Robust JSON parsing — strip markdown fences if present
                         cleaned = raw.strip()
                         if cleaned.startswith("```"):
                             cleaned = cleaned.split("\n", 1)[1]
@@ -1029,19 +1101,18 @@ Source material:
                             cleaned = cleaned.rsplit("```", 1)[0]
                         cleaned = cleaned.strip()
 
-                        # Try normal parse first, then repair if needed
                         parsed = None
                         try:
                             parsed = json.loads(cleaned)
                         except json.JSONDecodeError:
                             parsed = repair_truncated_json(cleaned)
 
-                        # Normalize keys so the rest of the app can use line["speaker"] / line["text"] safely
+                        # Normalize keys
                         if parsed and "dialogue" in parsed:
                             normalized = []
                             for entry in parsed["dialogue"]:
                                 speaker, text = _safe_line(entry)
-                                if text:  # skip empty entries
+                                if text:
                                     normalized.append({"speaker": speaker, "text": text})
                             parsed["dialogue"] = normalized
 
@@ -1089,7 +1160,6 @@ Source material:
             f"est. {word_count // 150} min"
         )
 
-        # Script export buttons
         exp_c1, exp_c2, exp_c3 = st.columns(3)
         with exp_c1:
             st.download_button(
@@ -1149,24 +1219,34 @@ Source material:
             ),
         )
         if st.button("▶️ Play Line"):
-            if not audio_client:
-                st.error("OpenAI key required for TTS.")
-            else:
-                line = dialogue[idx]
-                m_voice, f_voice = VOICE_MAP[voice_style]
-                voice = m_voice if line["speaker"] == "Host 1" else f_voice
-                speed = host1_speed if line["speaker"] == "Host 1" else host2_speed
-                if line["speaker"] == "Caller":
-                    voice = "fable"
-                    speed = caller_speed
+            line = dialogue[idx]
+            voice = m_voice if line["speaker"] == "Host 1" else f_voice
+            speed = host1_speed if line["speaker"] == "Host 1" else host2_speed
+            if line["speaker"] == "Caller":
+                voice = c_voice
+                speed = caller_speed
+
+            if use_edge:
+                # Edge TTS — no OpenAI key needed
                 with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-                    if generate_tts(
-                        audio_client, line["text"], voice, tmp.name,
-                        tts_model=tts_model, speed=speed,
-                    ):
-                        st.audio(tmp.name)
-                    else:
-                        st.error("TTS preview failed.")
+                    with st.spinner("Generating voice…"):
+                        if _sync_edge_tts(line["text"], voice, tmp.name, speed):
+                            st.audio(tmp.name)
+                        else:
+                            st.error("Edge TTS preview failed.")
+            else:
+                # OpenAI TTS
+                if not audio_client:
+                    st.error("OpenAI key required for TTS.")
+                else:
+                    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+                        if generate_tts(
+                            audio_client, line["text"], voice, tmp.name,
+                            tts_model=tts_model, speed=speed,
+                        ):
+                            st.audio(tmp.name)
+                        else:
+                            st.error("TTS preview failed.")
 
 
 # === TAB 4 — PRODUCTION =====================================================
@@ -1177,14 +1257,16 @@ with tab4:
         st.info("Generate a script in the **Script & Rehearsal** tab first.")
 
     elif st.button("🚀 Produce Final Podcast", type="primary"):
-        if not openai_key:
-            st.error("OpenAI key required for TTS production.")
+        # Only require OpenAI key when using OpenAI TTS
+        if not use_edge and not openai_key:
+            st.error("OpenAI key required for TTS production. Or switch to Edge TTS (Free).")
             st.stop()
 
         progress = st.progress(0, text="Starting production…")
         status = st.empty()
-        tts_client = OpenAI(api_key=openai_key)
-        m_voice, f_voice = VOICE_MAP[voice_style]
+
+        # Only create OpenAI client if using OpenAI TTS
+        tts_client = OpenAI(api_key=openai_key) if (not use_edge and openai_key) else None
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
@@ -1193,8 +1275,8 @@ with tab4:
             # Parallel TTS (thread-safe: errors collected, not printed)
             args_list = [
                 (
-                    i, line, tts_client, m_voice, f_voice, tmp,
-                    tts_model, host1_speed, host2_speed, caller_speed,
+                    i, line, tts_client, m_voice, f_voice, c_voice, tmp,
+                    tts_model, host1_speed, host2_speed, caller_speed, use_edge,
                 )
                 for i, line in enumerate(script)
             ]
@@ -1216,7 +1298,6 @@ with tab4:
                     if not ok:
                         tts_errors.append(f"Line {i}: {err_msg}")
 
-            # Show TTS errors on main thread (thread-safe)
             for err in tts_errors:
                 st.warning(err)
 
@@ -1234,7 +1315,6 @@ with tab4:
                 status.empty()
                 st.audio(audio_bytes, format="audio/mp3")
 
-                # Download row: podcast + subtitles
                 dl_c1, dl_c2 = st.columns(2)
                 with dl_c1:
                     st.download_button(
@@ -1253,9 +1333,9 @@ with tab4:
 
                 duration_est = sum(len(l["text"].split()) for l in script) / 150
                 size_mb = len(audio_bytes) / 1_048_576
+                tts_label = "Edge TTS (free)" if use_edge else ("HD audio" if tts_hd else "Standard TTS")
                 st.success(
-                    f"🎉 Done! ~{duration_est:.0f} min · {size_mb:.1f} MB"
-                    + (" · HD audio" if tts_hd else "")
+                    f"🎉 Done! ~{duration_est:.0f} min · {size_mb:.1f} MB · {tts_label}"
                 )
             else:
                 st.error("Production failed — check warnings above.")
