@@ -177,16 +177,20 @@ podcastlm-studio/
 └── .streamlit/
     └── config.toml            # Theme and server settings
 
-Contributing
+## Contributing
 
 Open an issue or PR if you want to:
 
-    🎵 Add new background music presets
-    🗣️ Integrate ElevenLabs or Azure TTS voices
-    🎬 Add export-to-video with burned-in subtitles
-    🌍 Improve non-Latin script rendering
-    🧪 Add automated tests
-    📱 Improve mobile layout
+- 🆓 **Integrate Edge TTS** — free Microsoft TTS, would eliminate voice costs entirely
+- 🗣️ **Integrate ElevenLabs** — best-in-class voice quality, subscription pricing
+- ☁️ **Add Google Cloud / Azure TTS** — 73% cheaper than OpenAI at scale
+- 🎵 Add new background music presets
+- 🎬 Add export-to-video with burned-in subtitles
+- 🌍 Improve non-Latin script rendering
+- 🧪 Add automated tests
+- 📱 Improve mobile layout
+
+The biggest cost-reduction win is a free TTS integration. If you've worked with `edge-tts` or Piper, your PR would make this tool genuinely free to run.
 
 All contributions welcome. This is a community project.
 FAQ
