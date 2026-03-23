@@ -1042,6 +1042,109 @@ audio_client: Optional[OpenAI] = OpenAI(api_key=openai_key) if openai_key else N
 # Main tabs
 # ---------------------------------------------------------------------------
 st.title("🎧 PodcastLM Studio")
+# ---------------------------------------------------------------------------
+# In-app guide
+# ---------------------------------------------------------------------------
+with st.expander("📘 How to Use This App", expanded=False):
+    st.markdown("""
+### Welcome to PodcastLM Studio!
+
+This app turns any document, article, video, or text into a fully produced AI podcast — with study tools, research chat, and more. Here's how each tab works:
+
+---
+
+#### 📄 Tab 1: Source
+Upload your content. This is the foundation for everything else in the app.
+
+- **Files** — PDF, DOCX, PPTX, TXT, or audio/video files (auto-transcribed via Whisper)
+- **Web URL** — paste an article link and the app scrapes the text
+- **Video URL** — paste a YouTube link and the app downloads + transcribes the audio
+- **Text** — paste raw text directly
+
+> **Tip:** You can upload multiple files at once. The app combines them into a single source.
+
+---
+
+#### 💬 Tab 2: Research Chat
+Ask questions about your source material. The AI answers using **only** what you uploaded — no hallucination, no outside knowledge.
+
+Great for:
+- Quickly understanding a long document
+- Finding specific facts or figures
+- Exploring the source before generating a podcast
+
+---
+
+#### 📝 Tab 3: Script & Rehearsal
+Generate a two-host podcast script from your source.
+
+1. **Director Notes** — tell the AI what tone, focus, or style you want (e.g., "Make it funny," "Focus on the methodology")
+2. **Caller Question** — optionally add a phone-in caller who asks a specific question
+3. Click **✨ Generate Script** and wait 30–90 seconds
+4. **Edit** any line, change speakers, rewrite dialogue
+5. **Rehearse** — preview any single line with the selected voice before producing
+
+> **Tip:** Use the sidebar to change language, duration, voice pair, and speaking speed.
+
+---
+
+#### 🎚️ Tab 4: Produce
+Turn your script into a finished podcast MP3.
+
+- All dialogue lines are voiced in parallel (fast!)
+- Background music, intro/outro, and caller phone effects are mixed in automatically
+- Download the final MP3 and SRT subtitles when done
+
+> **Tip:** Switch to **Edge TTS (Free)** in the sidebar to eliminate all voice generation costs.
+
+---
+
+#### 📚 Tab 5: Study Tools
+Generate NotebookLM-style study materials from your source:
+
+| Tool | What it creates |
+|---|---|
+| **Study Guide** | Structured summary with key concepts, takeaways, and review questions |
+| **Briefing Document** | Executive-style brief with findings, implications, and recommendations |
+| **FAQ** | 12–15 Q&A pairs covering the most important topics |
+| **Flashcards** | Interactive front/back cards for memorization |
+| **Timeline** | Chronological events or conceptual progression |
+| **Key Concepts** | Alphabetized glossary of important terms |
+
+You can generate them one at a time or click **🚀 Generate All** to create everything at once. All tools are downloadable as Markdown.
+
+---
+
+#### ⚙️ Sidebar Settings
+
+| Setting | What it does |
+|---|---|
+| **Intelligence Engine** | Choose your LLM: DeepSeek (cheapest), OpenAI, or Grok |
+| **Budget Mode** | Forces GPT-4o-mini for maximum savings |
+| **Privacy Mode** | Wipes source text from memory after script generation |
+| **TTS Provider** | OpenAI (paid, 6 voices) or Edge TTS (free, 300+ voices) |
+| **Voice Pair** | Choose the host voice combination |
+| **Speaking Speed** | Per-speaker speed sliders (Host 1, Host 2, Caller) |
+| **HD Voices** | Higher quality OpenAI TTS (2× cost) |
+| **Background Music** | Preset tracks, custom upload, or none |
+| **Session Save/Restore** | Download your session as JSON; upload it later to continue |
+
+---
+
+#### 💵 Cost
+
+| Component | Billed to | Typical cost |
+|---|---|---|
+| Script generation | DeepSeek / OpenAI / Grok key | ~$0.03–$0.30 |
+| Voice generation | OpenAI key (or free with Edge TTS) | $0.00–$1.00 |
+| Study tools | Same as script generation | ~$0.01–$0.05 each |
+
+**Cheapest setup:** DeepSeek + Edge TTS = **~$0.03 per podcast**.
+
+---
+
+*Need help? Open an issue on the [GitHub repo](https://github.com/your-username/podcastlm-studio).*
+    """)
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["📄 Source", "💬 Research Chat", "📝 Script & Rehearsal", "🎚️ Produce", "📚 Study Tools"],
 )
