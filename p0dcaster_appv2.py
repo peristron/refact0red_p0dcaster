@@ -5,6 +5,7 @@ JSON mode fallback, smart truncation, fallback concat integrity.
 Features: HD TTS, Edge TTS (free), per-speaker speed, script export,
 session save/restore, SRT subtitles, DeepSeek as default LLM,
 truncation recovery, NotebookLM-style study tools.
+Updates: Multi-format export for study tools (MD, DOCX, TXT).
 """
 
 import streamlit as st
@@ -390,6 +391,74 @@ def export_script_plain(data: Dict) -> str:
         lines.append(f"[{speaker}] {text}")
         lines.append("")
     return "\n".join(lines)
+
+
+def markdown_to_plain(md_text: str) -> str:
+    """Strip Markdown formatting to produce clean plain text."""
+    text = md_text
+    # Remove headers
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Remove bold/italic
+    text = re.sub(r'\*{1,3}(.*?)\*{1,3}', r'\1', text)
+    text = re.sub(r'_{1,3}(.*?)_{1,3}', r'\1', text)
+    # Remove markdown links [text](url) → text
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+    # Remove markdown images
+    text = re.sub(r'!\[([^\]]*)\]\([^\)]+\)', r'\1', text)
+    # Remove horizontal rules
+    text = re.sub(r'^---+$', '', text, flags=re.MULTILINE)
+    # Remove table formatting pipes but keep content
+    text = re.sub(r'\|', '  ', text)
+    # Clean up multiple blank lines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def markdown_to_docx_bytes(md_text: str, title: str = "Document") -> bytes:
+    """Convert Markdown text to a DOCX file, returned as bytes."""
+    doc = docx.Document()
+    doc.add_heading(title, level=0)
+
+    for line in md_text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Headers
+        if stripped.startswith("######"):
+            doc.add_heading(stripped.lstrip("#").strip(), level=5)
+        elif stripped.startswith("#####"):
+            doc.add_heading(stripped.lstrip("#").strip(), level=4)
+        elif stripped.startswith("####"):
+            doc.add_heading(stripped.lstrip("#").strip(), level=3)
+        elif stripped.startswith("###"):
+            doc.add_heading(stripped.lstrip("#").strip(), level=2)
+        elif stripped.startswith("##"):
+            doc.add_heading(stripped.lstrip("#").strip(), level=1)
+        elif stripped.startswith("#"):
+            doc.add_heading(stripped.lstrip("#").strip(), level=0)
+        # Horizontal rules
+        elif stripped in ("---", "***", "___"):
+            doc.add_paragraph("─" * 50)
+        # Bullet points
+        elif stripped.startswith("- ") or stripped.startswith("* "):
+            # Strip bold markdown for cleaner docx
+            clean = re.sub(r'\*{1,2}(.*?)\*{1,2}', r'\1', stripped[2:])
+            doc.add_paragraph(clean, style="List Bullet")
+        # Numbered items
+        elif re.match(r'^\d+\.\s', stripped):
+            clean = re.sub(r'\*{1,2}(.*?)\*{1,2}', r'\1', re.sub(r'^\d+\.\s', '', stripped))
+            doc.add_paragraph(clean, style="List Number")
+        # Regular paragraph
+        else:
+            # Strip bold/italic markdown
+            clean = re.sub(r'\*{1,2}(.*?)\*{1,2}', r'\1', stripped)
+            clean = re.sub(r'_{1,2}(.*?)_{1,2}', r'\1', clean)
+            doc.add_paragraph(clean)
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    return buffer.getvalue()
 
 
 def render_flashcards_markdown(cards: List[Dict]) -> str:
@@ -1111,7 +1180,7 @@ Generate NotebookLM-style study materials from your source:
 | **Timeline** | Chronological events or conceptual progression |
 | **Key Concepts** | Alphabetized glossary of important terms |
 
-You can generate them one at a time or click **🚀 Generate All** to create everything at once. All tools are downloadable as Markdown.
+You can generate them one at a time or click **🚀 Generate All** to create everything at once. All tools are downloadable as Markdown, Word, or Plain Text.
 
 ---
 
@@ -1692,13 +1761,21 @@ with tab5:
 
         if st.session_state.study_guide:
             with col_dl:
-                st.download_button(
-                    "⬇️ Download",
-                    st.session_state.study_guide,
-                    file_name=f"study_guide_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
-                    mime="text/markdown",
-                    key="dl_study_guide",
-                )
+                dl_fmt = st.selectbox("Format", ["Markdown", "Word (.docx)", "Plain Text"], key="fmt_study_guide")
+                content = st.session_state.study_guide
+                if dl_fmt == "Markdown":
+                    st.download_button("⬇️ Download", content,
+                        file_name=f"study_guide_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                        mime="text/markdown", key="dl_study_guide")
+                elif dl_fmt == "Word (.docx)":
+                    st.download_button("⬇️ Download", markdown_to_docx_bytes(content, "Study Guide"),
+                        file_name=f"study_guide_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key="dl_study_guide")
+                else:
+                    st.download_button("⬇️ Download", markdown_to_plain(content),
+                        file_name=f"study_guide_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                        mime="text/plain", key="dl_study_guide")
             with st.expander("View Study Guide", expanded=True):
                 st.markdown(st.session_state.study_guide)
 
@@ -1727,13 +1804,21 @@ with tab5:
 
         if st.session_state.briefing_doc:
             with col_dl:
-                st.download_button(
-                    "⬇️ Download",
-                    st.session_state.briefing_doc,
-                    file_name=f"briefing_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
-                    mime="text/markdown",
-                    key="dl_briefing",
-                )
+                dl_fmt = st.selectbox("Format", ["Markdown", "Word (.docx)", "Plain Text"], key="fmt_briefing")
+                content = st.session_state.briefing_doc
+                if dl_fmt == "Markdown":
+                    st.download_button("⬇️ Download", content,
+                        file_name=f"briefing_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                        mime="text/markdown", key="dl_briefing")
+                elif dl_fmt == "Word (.docx)":
+                    st.download_button("⬇️ Download", markdown_to_docx_bytes(content, "Briefing Document"),
+                        file_name=f"briefing_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key="dl_briefing")
+                else:
+                    st.download_button("⬇️ Download", markdown_to_plain(content),
+                        file_name=f"briefing_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                        mime="text/plain", key="dl_briefing")
             with st.expander("View Briefing Document", expanded=True):
                 st.markdown(st.session_state.briefing_doc)
 
@@ -1762,13 +1847,21 @@ with tab5:
 
         if st.session_state.faq_doc:
             with col_dl:
-                st.download_button(
-                    "⬇️ Download",
-                    st.session_state.faq_doc,
-                    file_name=f"faq_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
-                    mime="text/markdown",
-                    key="dl_faq",
-                )
+                dl_fmt = st.selectbox("Format", ["Markdown", "Word (.docx)", "Plain Text"], key="fmt_faq")
+                content = st.session_state.faq_doc
+                if dl_fmt == "Markdown":
+                    st.download_button("⬇️ Download", content,
+                        file_name=f"faq_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                        mime="text/markdown", key="dl_faq")
+                elif dl_fmt == "Word (.docx)":
+                    st.download_button("⬇️ Download", markdown_to_docx_bytes(content, "FAQ"),
+                        file_name=f"faq_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key="dl_faq")
+                else:
+                    st.download_button("⬇️ Download", markdown_to_plain(content),
+                        file_name=f"faq_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                        mime="text/plain", key="dl_faq")
             with st.expander("View FAQ", expanded=True):
                 st.markdown(st.session_state.faq_doc)
 
@@ -1805,13 +1898,21 @@ with tab5:
             cards = st.session_state.flashcards
             if isinstance(cards, list):
                 with col_dl:
-                    st.download_button(
-                        "⬇️ Download",
-                        render_flashcards_markdown(cards),
-                        file_name=f"flashcards_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
-                        mime="text/markdown",
-                        key="dl_flashcards",
-                    )
+                    fc_md = render_flashcards_markdown(cards)
+                    dl_fmt = st.selectbox("Format", ["Markdown", "Word (.docx)", "Plain Text"], key="fmt_flashcards")
+                    if dl_fmt == "Markdown":
+                        st.download_button("⬇️ Download", fc_md,
+                            file_name=f"flashcards_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                            mime="text/markdown", key="dl_flashcards")
+                    elif dl_fmt == "Word (.docx)":
+                        st.download_button("⬇️ Download", markdown_to_docx_bytes(fc_md, "Flashcards"),
+                            file_name=f"flashcards_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            key="dl_flashcards")
+                    else:
+                        st.download_button("⬇️ Download", markdown_to_plain(fc_md),
+                            file_name=f"flashcards_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                            mime="text/plain", key="dl_flashcards")
                 with st.expander(f"View Flashcards ({len(cards)} cards)", expanded=True):
                     # Interactive flashcard viewer
                     card_idx = st.selectbox(
@@ -1859,13 +1960,21 @@ with tab5:
 
         if st.session_state.timeline:
             with col_dl:
-                st.download_button(
-                    "⬇️ Download",
-                    st.session_state.timeline,
-                    file_name=f"timeline_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
-                    mime="text/markdown",
-                    key="dl_timeline",
-                )
+                dl_fmt = st.selectbox("Format", ["Markdown", "Word (.docx)", "Plain Text"], key="fmt_timeline")
+                content = st.session_state.timeline
+                if dl_fmt == "Markdown":
+                    st.download_button("⬇️ Download", content,
+                        file_name=f"timeline_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                        mime="text/markdown", key="dl_timeline")
+                elif dl_fmt == "Word (.docx)":
+                    st.download_button("⬇️ Download", markdown_to_docx_bytes(content, "Timeline"),
+                        file_name=f"timeline_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key="dl_timeline")
+                else:
+                    st.download_button("⬇️ Download", markdown_to_plain(content),
+                        file_name=f"timeline_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                        mime="text/plain", key="dl_timeline")
             with st.expander("View Timeline", expanded=True):
                 st.markdown(st.session_state.timeline)
 
@@ -1894,13 +2003,21 @@ with tab5:
 
         if st.session_state.key_concepts:
             with col_dl:
-                st.download_button(
-                    "⬇️ Download",
-                    st.session_state.key_concepts,
-                    file_name=f"glossary_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
-                    mime="text/markdown",
-                    key="dl_concepts",
-                )
+                dl_fmt = st.selectbox("Format", ["Markdown", "Word (.docx)", "Plain Text"], key="fmt_concepts")
+                content = st.session_state.key_concepts
+                if dl_fmt == "Markdown":
+                    st.download_button("⬇️ Download", content,
+                        file_name=f"glossary_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                        mime="text/markdown", key="dl_concepts")
+                elif dl_fmt == "Word (.docx)":
+                    st.download_button("⬇️ Download", markdown_to_docx_bytes(content, "Key Concepts & Glossary"),
+                        file_name=f"glossary_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key="dl_concepts")
+                else:
+                    st.download_button("⬇️ Download", markdown_to_plain(content),
+                        file_name=f"glossary_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                        mime="text/plain", key="dl_concepts")
             with st.expander("View Key Concepts", expanded=True):
                 st.markdown(st.session_state.key_concepts)
 
@@ -1932,10 +2049,24 @@ with tab5:
                 all_tools_parts.append(st.session_state.key_concepts + "\n\n")
 
             combined = "\n".join(all_tools_parts)
-            st.download_button(
-                "📦 Download All Study Materials",
-                combined,
-                file_name=f"study_materials_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
-                mime="text/markdown",
-                type="primary",
+            
+            all_fmt = st.radio(
+                "Download All format:",
+                ["Markdown", "Word (.docx)", "Plain Text"],
+                horizontal=True,
+                key="fmt_all_tools",
             )
+            if all_fmt == "Markdown":
+                st.download_button("📦 Download All Study Materials", combined,
+                    file_name=f"study_materials_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                    mime="text/markdown", type="primary", key="dl_all_tools")
+            elif all_fmt == "Word (.docx)":
+                st.download_button("📦 Download All Study Materials",
+                    markdown_to_docx_bytes(combined, "Study Materials"),
+                    file_name=f"study_materials_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    type="primary", key="dl_all_tools")
+            else:
+                st.download_button("📦 Download All Study Materials", markdown_to_plain(combined),
+                    file_name=f"study_materials_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                    mime="text/plain", type="primary", key="dl_all_tools")
