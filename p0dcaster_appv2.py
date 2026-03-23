@@ -1,9 +1,10 @@
 """
-PodcastLM Studio v2 — AI-powered podcast generator.
+PodcastLM Studio v2 — AI-powered podcast generator + study tools.
 Bug fixes: thread-safe TTS, music ramp-up ordering, Whisper size check,
 JSON mode fallback, smart truncation, fallback concat integrity.
 Features: HD TTS, Edge TTS (free), per-speaker speed, script export,
-session save/restore, SRT subtitles, DeepSeek as default LLM, truncation recovery.
+session save/restore, SRT subtitles, DeepSeek as default LLM,
+truncation recovery, NotebookLM-style study tools.
 """
 
 import streamlit as st
@@ -55,7 +56,6 @@ VOICE_MAP = {
     "Formal (Echo & Fable)": ("echo", "fable"),
 }
 
-# Edge TTS voices per language: (Host 1 male, Host 2 female, Caller)
 EDGE_LANGUAGE_VOICES = {
     "English (US)": ("en-US-GuyNeural", "en-US-JennyNeural", "en-US-DavisNeural"),
     "English (UK)": ("en-GB-RyanNeural", "en-GB-SoniaNeural", "en-GB-ThomasNeural"),
@@ -134,6 +134,83 @@ SOURCE_CHARS_BY_LENGTH = {
     "Extra Long (30 min)": 40_000,
 }
 
+# ---------------------------------------------------------------------------
+# Study tool prompts
+# ---------------------------------------------------------------------------
+STUDY_TOOL_PROMPTS = {
+    "Study Guide": (
+        "Create a comprehensive study guide from the source material. Include:\n"
+        "1. **Overview** — a 2–3 paragraph summary\n"
+        "2. **Key Concepts** — the most important ideas, each with a brief explanation\n"
+        "3. **Important Details** — specific facts, figures, dates, or findings worth remembering\n"
+        "4. **Key Takeaways** — 5–10 bullet points summarizing what a reader should walk away knowing\n"
+        "5. **Review Questions** — 5 questions a student could use to test their understanding\n\n"
+        "Use clear Markdown formatting with headers, bold terms, and bullet points."
+    ),
+    "Briefing Document": (
+        "Create an executive briefing document from the source material. Include:\n"
+        "1. **Executive Summary** — 2–3 paragraphs covering the core message\n"
+        "2. **Key Findings** — numbered list of the most important findings or arguments\n"
+        "3. **Supporting Evidence** — specific data points, quotes, or references that back up the findings\n"
+        "4. **Implications** — what these findings mean for the relevant field, organization, or audience\n"
+        "5. **Recommendations** — actionable next steps based on the material\n"
+        "6. **Open Questions** — areas that need further research or clarification\n\n"
+        "Write in a professional, concise tone. Use Markdown formatting."
+    ),
+    "FAQ": (
+        "Generate a comprehensive FAQ (Frequently Asked Questions) document from the source material.\n"
+        "Create 12–15 question-and-answer pairs that cover:\n"
+        "- The main topic and why it matters\n"
+        "- Key concepts that might confuse a newcomer\n"
+        "- Specific findings or claims and their evidence\n"
+        "- Practical implications\n"
+        "- Common misconceptions the source addresses\n\n"
+        "Format each as:\n"
+        "### Q: [question]\n"
+        "**A:** [thorough 2–4 sentence answer]\n\n"
+        "Use only information from the source. If something isn't addressed, don't invent answers."
+    ),
+    "Flashcards": (
+        "Create a set of 20–30 flashcards from the source material for studying.\n"
+        "Each flashcard should have a **Front** (term, question, or concept) and a "
+        "**Back** (definition, answer, or explanation).\n\n"
+        "Cover:\n"
+        "- Key terms and definitions\n"
+        "- Important facts and figures\n"
+        "- Cause-and-effect relationships\n"
+        "- Key people, places, or events mentioned\n\n"
+        "Format as a JSON array:\n"
+        '[{"front": "...", "back": "..."}, ...]\n\n'
+        "Output ONLY the JSON array — no markdown fences, no extra text."
+    ),
+    "Timeline": (
+        "Extract a chronological timeline of events, developments, or milestones "
+        "from the source material.\n\n"
+        "For each entry include:\n"
+        "- **Date/Period** — as specific as the source allows\n"
+        "- **Event** — what happened\n"
+        "- **Significance** — why it matters (1 sentence)\n\n"
+        "Format as a Markdown list:\n"
+        "- **[date]** — [event]. *[significance]*\n\n"
+        "If the source doesn't contain chronological information, create a logical "
+        "progression of ideas/arguments instead, labeled as a 'Conceptual Progression.'\n"
+        "Order from earliest to latest (or from foundational to advanced)."
+    ),
+    "Key Concepts": (
+        "Create an alphabetized glossary of key concepts, terms, and definitions "
+        "from the source material.\n\n"
+        "For each entry include:\n"
+        "- **Term** (bolded)\n"
+        "- **Definition** — clear, concise explanation (1–3 sentences)\n"
+        "- **Context** — how this term is used or why it matters in the source\n\n"
+        "Format as:\n"
+        "### A\n"
+        "**Term** — Definition. *Context.*\n\n"
+        "Include 15–30 terms. Only include terms that appear in or are directly "
+        "relevant to the source material."
+    ),
+}
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -159,6 +236,13 @@ _DEFAULTS: Dict[str, Any] = {
     "chat_history": [],
     "notebook_content": "",
     "rehearsal_audio": None,
+    # Study tools
+    "study_guide": None,
+    "briefing_doc": None,
+    "faq_doc": None,
+    "flashcards": None,
+    "timeline": None,
+    "key_concepts": None,
 }
 
 for _k, _v in _DEFAULTS.items():
@@ -308,6 +392,19 @@ def export_script_plain(data: Dict) -> str:
     return "\n".join(lines)
 
 
+def render_flashcards_markdown(cards: List[Dict]) -> str:
+    """Convert flashcard dicts to readable Markdown."""
+    lines = ["# Flashcards\n"]
+    for i, card in enumerate(cards, 1):
+        front = card.get("front") or card.get("Front") or card.get("question") or "?"
+        back = card.get("back") or card.get("Back") or card.get("answer") or "?"
+        lines.append(f"### Card {i}")
+        lines.append(f"**Q:** {front}\n")
+        lines.append(f"**A:** {back}\n")
+        lines.append("---\n")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # LLM helpers
 # ---------------------------------------------------------------------------
@@ -362,11 +459,59 @@ def translate_if_needed(text: str, target_lang: str, openai_key: str) -> str:
         return text
 
 
+def generate_study_tool(
+    client: OpenAI,
+    model: str,
+    source_text: str,
+    tool_name: str,
+    language: str,
+    is_json: bool = False,
+) -> Optional[str]:
+    """Generate a study tool document from source material.
+    Returns the raw text/markdown, or JSON string for flashcards."""
+    prompt_body = STUDY_TOOL_PROMPTS.get(tool_name, "")
+    if not prompt_body:
+        return None
+
+    prompt = (
+        f"Based on the following source material, {prompt_body}\n\n"
+        f"Write the output in {language}.\n\n"
+        f"Source material:\n{smart_truncate(source_text)}"
+    )
+
+    desired_tokens = MODEL_MAX_TOKENS.get(model, DEFAULT_MODEL_MAX)
+
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": desired_tokens,
+    }
+
+    if is_json and any(model.startswith(p) for p in JSON_MODE_PREFIXES):
+        kwargs["response_format"] = {"type": "json_object"}
+
+    try:
+        res = client.chat.completions.create(**kwargs)
+        raw = res.choices[0].message.content
+
+        # Strip markdown fences if present
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[1]
+        if cleaned.endswith("```"):
+            cleaned = cleaned.rsplit("```", 1)[0]
+
+        return cleaned.strip()
+    except Exception as e:
+        st.error(f"Generation failed: {e}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Audio helpers — Edge TTS
 # ---------------------------------------------------------------------------
 def _sync_edge_tts(text: str, voice: str, filepath: str, speed: float = 1.0) -> bool:
-    """Synchronous wrapper for edge-tts. Safe in main thread and worker threads."""
+    """Synchronous wrapper for edge-tts."""
     try:
         rate_str = f"{int((speed - 1) * 100):+d}%"
         communicate = edge_tts.Communicate(text, voice, rate=rate_str)
@@ -390,7 +535,7 @@ def generate_tts(
     client: Optional[OpenAI], text: str, voice: str, filepath: str,
     tts_model: str = "tts-1", speed: float = 1.0, use_edge: bool = False,
 ) -> bool:
-    """Generate a single TTS segment (main-thread only). Returns True on success."""
+    """Generate a single TTS segment (main-thread only)."""
     if use_edge:
         return _sync_edge_tts(text, voice, filepath, speed)
     try:
@@ -407,8 +552,7 @@ def generate_tts(
 
 
 def _voice_line_worker(args: tuple) -> Tuple[int, bool, Optional[str]]:
-    """Thread-safe TTS worker — NO Streamlit calls allowed here.
-    Supports both OpenAI and Edge TTS."""
+    """Thread-safe TTS worker — NO Streamlit calls allowed here."""
     (i, line, tts_client, m_voice, f_voice, c_voice, tmp_path,
      tts_model_name, h1_speed, h2_speed, c_speed, use_edge) = args
 
@@ -731,7 +875,6 @@ with st.sidebar:
     use_edge = tts_provider == "Edge TTS (Free)"
 
     if not use_edge:
-        # OpenAI voice selection
         voice_style = st.selectbox("Voice Pair", list(VOICE_MAP.keys()))
         m_voice, f_voice = VOICE_MAP[voice_style]
         c_voice = "fable"
@@ -742,7 +885,6 @@ with st.sidebar:
         )
         tts_model = "tts-1-hd" if tts_hd else "tts-1"
     else:
-        # Edge TTS — voices auto-selected by language
         edge_voices = EDGE_LANGUAGE_VOICES.get(
             language, EDGE_LANGUAGE_VOICES["English (US)"],
         )
@@ -757,7 +899,6 @@ with st.sidebar:
         if c_voice != m_voice:
             st.caption(f"📞 Caller: `{c_voice}`")
 
-    # Per-speaker speed (works for both providers)
     st.caption("Speaking Speed")
     spd_c1, spd_c2 = st.columns(2)
     with spd_c1:
@@ -794,6 +935,12 @@ with st.sidebar:
                 "script_data": st.session_state.script_data,
                 "source_text": st.session_state.source_text,
                 "chat_history": st.session_state.chat_history,
+                "study_guide": st.session_state.study_guide,
+                "briefing_doc": st.session_state.briefing_doc,
+                "faq_doc": st.session_state.faq_doc,
+                "flashcards": st.session_state.flashcards,
+                "timeline": st.session_state.timeline,
+                "key_concepts": st.session_state.key_concepts,
                 "exported_at": datetime.now().isoformat(),
             }
             st.download_button(
@@ -815,6 +962,12 @@ with st.sidebar:
                     st.session_state.script_data = restored.get("script_data")
                     st.session_state.source_text = restored.get("source_text", "")
                     st.session_state.chat_history = restored.get("chat_history", [])
+                    st.session_state.study_guide = restored.get("study_guide")
+                    st.session_state.briefing_doc = restored.get("briefing_doc")
+                    st.session_state.faq_doc = restored.get("faq_doc")
+                    st.session_state.flashcards = restored.get("flashcards")
+                    st.session_state.timeline = restored.get("timeline")
+                    st.session_state.key_concepts = restored.get("key_concepts")
                     st.success(
                         f"Session restored (saved {restored.get('exported_at', 'unknown')})"
                     )
@@ -889,14 +1042,14 @@ audio_client: Optional[OpenAI] = OpenAI(api_key=openai_key) if openai_key else N
 # Main tabs
 # ---------------------------------------------------------------------------
 st.title("🎧 PodcastLM Studio")
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["📄 Source", "💬 Research Chat", "📝 Script & Rehearsal", "🎚️ Produce"],
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["📄 Source", "💬 Research Chat", "📝 Script & Rehearsal", "🎚️ Produce", "📚 Study Tools"],
 )
 
 
 # === TAB 1 — SOURCE =========================================================
 with tab1:
-    st.info("Upload content — this drives both the research chat and podcast generation.")
+    st.info("Upload content — this drives the research chat, podcast, and study tools.")
     input_type = st.radio(
         "Input Type", ["Files", "Web URL", "Video URL", "Text"], horizontal=True,
     )
@@ -939,6 +1092,9 @@ with tab1:
         st.session_state.notebook_content += (
             f"\n---\n### New Source ({datetime.now().strftime('%H:%M')})\n\n"
         )
+        # Clear study tools when source changes
+        for tool_key in ["study_guide", "briefing_doc", "faq_doc", "flashcards", "timeline", "key_concepts"]:
+            st.session_state[tool_key] = None
         st.success(f"✅ Source loaded — {len(new_text):,} characters.")
 
     if st.session_state.source_text:
@@ -1107,7 +1263,6 @@ Source material:
                         except json.JSONDecodeError:
                             parsed = repair_truncated_json(cleaned)
 
-                        # Normalize keys
                         if parsed and "dialogue" in parsed:
                             normalized = []
                             for entry in parsed["dialogue"]:
@@ -1227,7 +1382,6 @@ Source material:
                 speed = caller_speed
 
             if use_edge:
-                # Edge TTS — no OpenAI key needed
                 with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
                     with st.spinner("Generating voice…"):
                         if _sync_edge_tts(line["text"], voice, tmp.name, speed):
@@ -1235,7 +1389,6 @@ Source material:
                         else:
                             st.error("Edge TTS preview failed.")
             else:
-                # OpenAI TTS
                 if not audio_client:
                     st.error("OpenAI key required for TTS.")
                 else:
@@ -1257,7 +1410,6 @@ with tab4:
         st.info("Generate a script in the **Script & Rehearsal** tab first.")
 
     elif st.button("🚀 Produce Final Podcast", type="primary"):
-        # Only require OpenAI key when using OpenAI TTS
         if not use_edge and not openai_key:
             st.error("OpenAI key required for TTS production. Or switch to Edge TTS (Free).")
             st.stop()
@@ -1265,14 +1417,12 @@ with tab4:
         progress = st.progress(0, text="Starting production…")
         status = st.empty()
 
-        # Only create OpenAI client if using OpenAI TTS
         tts_client = OpenAI(api_key=openai_key) if (not use_edge and openai_key) else None
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
             script = st.session_state.script_data["dialogue"]
 
-            # Parallel TTS (thread-safe: errors collected, not printed)
             args_list = [
                 (
                     i, line, tts_client, m_voice, f_voice, c_voice, tmp,
@@ -1339,3 +1489,350 @@ with tab4:
                 )
             else:
                 st.error("Production failed — check warnings above.")
+
+
+# === TAB 5 — STUDY TOOLS ====================================================
+with tab5:
+    st.header("📚 Study Tools")
+    st.caption(
+        "Generate study materials from your source content — "
+        "similar to Google NotebookLM, but open source and using your own LLM."
+    )
+
+    if not st.session_state.source_text:
+        st.info("Load source content in the **Source** tab first.")
+    else:
+        # Count how many tools have been generated
+        tool_state_keys = {
+            "Study Guide": "study_guide",
+            "Briefing Document": "briefing_doc",
+            "FAQ": "faq_doc",
+            "Flashcards": "flashcards",
+            "Timeline": "timeline",
+            "Key Concepts": "key_concepts",
+        }
+        generated_count = sum(
+            1 for k in tool_state_keys.values() if st.session_state.get(k)
+        )
+        st.caption(f"{generated_count}/{len(tool_state_keys)} tools generated for current source.")
+
+        # --- Generate All button ---
+        if st.button("🚀 Generate All Study Tools", type="primary"):
+            client, model, err = get_llm_client(
+                model_choice, _resolve_model_name(),
+                openai_key, xai_key, deepseek_key, budget_mode,
+            )
+            if err:
+                st.error(err)
+            else:
+                progress = st.progress(0, text="Generating study tools…")
+                tools_list = list(tool_state_keys.items())
+
+                for idx, (tool_name, state_key) in enumerate(tools_list):
+                    if st.session_state.get(state_key):
+                        progress.progress(
+                            (idx + 1) / len(tools_list),
+                            text=f"Skipping {tool_name} (already generated)…",
+                        )
+                        continue
+
+                    progress.progress(
+                        (idx + 1) / len(tools_list),
+                        text=f"Generating {tool_name}…",
+                    )
+
+                    is_json = tool_name == "Flashcards"
+                    result = generate_study_tool(
+                        client, model, st.session_state.source_text,
+                        tool_name, language, is_json=is_json,
+                    )
+
+                    if result:
+                        if is_json:
+                            try:
+                                cards = json.loads(result)
+                                if isinstance(cards, dict) and "flashcards" in cards:
+                                    cards = cards["flashcards"]
+                                st.session_state[state_key] = cards
+                            except json.JSONDecodeError:
+                                st.session_state[state_key] = result
+                        else:
+                            st.session_state[state_key] = result
+
+                progress.progress(1.0, text="✅ All tools generated!")
+                st.rerun()
+
+        st.divider()
+
+        # --- Individual tools in expanders ---
+
+        # 1. Study Guide
+        st.subheader("📖 Study Guide")
+        col_gen, col_dl = st.columns([3, 1])
+        with col_gen:
+            if st.button("Generate Study Guide", key="gen_study_guide"):
+                client, model, err = get_llm_client(
+                    model_choice, _resolve_model_name(),
+                    openai_key, xai_key, deepseek_key, budget_mode,
+                )
+                if err:
+                    st.error(err)
+                else:
+                    with st.spinner("Generating study guide…"):
+                        result = generate_study_tool(
+                            client, model, st.session_state.source_text,
+                            "Study Guide", language,
+                        )
+                        if result:
+                            st.session_state.study_guide = result
+                            st.rerun()
+
+        if st.session_state.study_guide:
+            with col_dl:
+                st.download_button(
+                    "⬇️ Download",
+                    st.session_state.study_guide,
+                    file_name=f"study_guide_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                    mime="text/markdown",
+                    key="dl_study_guide",
+                )
+            with st.expander("View Study Guide", expanded=True):
+                st.markdown(st.session_state.study_guide)
+
+        st.divider()
+
+        # 2. Briefing Document
+        st.subheader("📋 Briefing Document")
+        col_gen, col_dl = st.columns([3, 1])
+        with col_gen:
+            if st.button("Generate Briefing Document", key="gen_briefing"):
+                client, model, err = get_llm_client(
+                    model_choice, _resolve_model_name(),
+                    openai_key, xai_key, deepseek_key, budget_mode,
+                )
+                if err:
+                    st.error(err)
+                else:
+                    with st.spinner("Generating briefing document…"):
+                        result = generate_study_tool(
+                            client, model, st.session_state.source_text,
+                            "Briefing Document", language,
+                        )
+                        if result:
+                            st.session_state.briefing_doc = result
+                            st.rerun()
+
+        if st.session_state.briefing_doc:
+            with col_dl:
+                st.download_button(
+                    "⬇️ Download",
+                    st.session_state.briefing_doc,
+                    file_name=f"briefing_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                    mime="text/markdown",
+                    key="dl_briefing",
+                )
+            with st.expander("View Briefing Document", expanded=True):
+                st.markdown(st.session_state.briefing_doc)
+
+        st.divider()
+
+        # 3. FAQ
+        st.subheader("❓ FAQ")
+        col_gen, col_dl = st.columns([3, 1])
+        with col_gen:
+            if st.button("Generate FAQ", key="gen_faq"):
+                client, model, err = get_llm_client(
+                    model_choice, _resolve_model_name(),
+                    openai_key, xai_key, deepseek_key, budget_mode,
+                )
+                if err:
+                    st.error(err)
+                else:
+                    with st.spinner("Generating FAQ…"):
+                        result = generate_study_tool(
+                            client, model, st.session_state.source_text,
+                            "FAQ", language,
+                        )
+                        if result:
+                            st.session_state.faq_doc = result
+                            st.rerun()
+
+        if st.session_state.faq_doc:
+            with col_dl:
+                st.download_button(
+                    "⬇️ Download",
+                    st.session_state.faq_doc,
+                    file_name=f"faq_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                    mime="text/markdown",
+                    key="dl_faq",
+                )
+            with st.expander("View FAQ", expanded=True):
+                st.markdown(st.session_state.faq_doc)
+
+        st.divider()
+
+        # 4. Flashcards
+        st.subheader("🃏 Flashcards")
+        col_gen, col_dl = st.columns([3, 1])
+        with col_gen:
+            if st.button("Generate Flashcards", key="gen_flashcards"):
+                client, model, err = get_llm_client(
+                    model_choice, _resolve_model_name(),
+                    openai_key, xai_key, deepseek_key, budget_mode,
+                )
+                if err:
+                    st.error(err)
+                else:
+                    with st.spinner("Generating flashcards…"):
+                        result = generate_study_tool(
+                            client, model, st.session_state.source_text,
+                            "Flashcards", language, is_json=True,
+                        )
+                        if result:
+                            try:
+                                cards = json.loads(result)
+                                if isinstance(cards, dict) and "flashcards" in cards:
+                                    cards = cards["flashcards"]
+                                st.session_state.flashcards = cards
+                            except json.JSONDecodeError:
+                                st.session_state.flashcards = result
+                            st.rerun()
+
+        if st.session_state.flashcards:
+            cards = st.session_state.flashcards
+            if isinstance(cards, list):
+                with col_dl:
+                    st.download_button(
+                        "⬇️ Download",
+                        render_flashcards_markdown(cards),
+                        file_name=f"flashcards_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                        mime="text/markdown",
+                        key="dl_flashcards",
+                    )
+                with st.expander(f"View Flashcards ({len(cards)} cards)", expanded=True):
+                    # Interactive flashcard viewer
+                    card_idx = st.selectbox(
+                        "Select card",
+                        range(len(cards)),
+                        format_func=lambda i: f"Card {i + 1}: {str(cards[i].get('front', cards[i].get('Front', '?')))[:60]}…",
+                        key="flashcard_select",
+                    )
+                    card = cards[card_idx]
+                    front = card.get("front") or card.get("Front") or card.get("question") or "?"
+                    back = card.get("back") or card.get("Back") or card.get("answer") or "?"
+
+                    st.markdown(f"### 📌 {front}")
+                    if st.button("🔄 Reveal Answer", key="reveal_flashcard"):
+                        st.markdown(f"**Answer:** {back}")
+                    else:
+                        st.caption("Click 'Reveal Answer' to see the back of the card.")
+            else:
+                # Fallback if flashcards came back as text instead of JSON
+                with st.expander("View Flashcards", expanded=True):
+                    st.markdown(str(cards))
+
+        st.divider()
+
+        # 5. Timeline
+        st.subheader("📅 Timeline")
+        col_gen, col_dl = st.columns([3, 1])
+        with col_gen:
+            if st.button("Generate Timeline", key="gen_timeline"):
+                client, model, err = get_llm_client(
+                    model_choice, _resolve_model_name(),
+                    openai_key, xai_key, deepseek_key, budget_mode,
+                )
+                if err:
+                    st.error(err)
+                else:
+                    with st.spinner("Generating timeline…"):
+                        result = generate_study_tool(
+                            client, model, st.session_state.source_text,
+                            "Timeline", language,
+                        )
+                        if result:
+                            st.session_state.timeline = result
+                            st.rerun()
+
+        if st.session_state.timeline:
+            with col_dl:
+                st.download_button(
+                    "⬇️ Download",
+                    st.session_state.timeline,
+                    file_name=f"timeline_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                    mime="text/markdown",
+                    key="dl_timeline",
+                )
+            with st.expander("View Timeline", expanded=True):
+                st.markdown(st.session_state.timeline)
+
+        st.divider()
+
+        # 6. Key Concepts / Glossary
+        st.subheader("📘 Key Concepts & Glossary")
+        col_gen, col_dl = st.columns([3, 1])
+        with col_gen:
+            if st.button("Generate Key Concepts", key="gen_concepts"):
+                client, model, err = get_llm_client(
+                    model_choice, _resolve_model_name(),
+                    openai_key, xai_key, deepseek_key, budget_mode,
+                )
+                if err:
+                    st.error(err)
+                else:
+                    with st.spinner("Generating key concepts…"):
+                        result = generate_study_tool(
+                            client, model, st.session_state.source_text,
+                            "Key Concepts", language,
+                        )
+                        if result:
+                            st.session_state.key_concepts = result
+                            st.rerun()
+
+        if st.session_state.key_concepts:
+            with col_dl:
+                st.download_button(
+                    "⬇️ Download",
+                    st.session_state.key_concepts,
+                    file_name=f"glossary_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                    mime="text/markdown",
+                    key="dl_concepts",
+                )
+            with st.expander("View Key Concepts", expanded=True):
+                st.markdown(st.session_state.key_concepts)
+
+        # --- Export all tools as a single document ---
+        st.divider()
+        if generated_count > 0:
+            all_tools_parts = [
+                f"# Study Materials\n",
+                f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n",
+                f"**Source:** {len(st.session_state.source_text):,} characters\n\n",
+            ]
+            if st.session_state.study_guide:
+                all_tools_parts.append("---\n\n# Study Guide\n\n")
+                all_tools_parts.append(st.session_state.study_guide + "\n\n")
+            if st.session_state.briefing_doc:
+                all_tools_parts.append("---\n\n# Briefing Document\n\n")
+                all_tools_parts.append(st.session_state.briefing_doc + "\n\n")
+            if st.session_state.faq_doc:
+                all_tools_parts.append("---\n\n# FAQ\n\n")
+                all_tools_parts.append(st.session_state.faq_doc + "\n\n")
+            if st.session_state.flashcards and isinstance(st.session_state.flashcards, list):
+                all_tools_parts.append("---\n\n")
+                all_tools_parts.append(render_flashcards_markdown(st.session_state.flashcards) + "\n\n")
+            if st.session_state.timeline:
+                all_tools_parts.append("---\n\n# Timeline\n\n")
+                all_tools_parts.append(st.session_state.timeline + "\n\n")
+            if st.session_state.key_concepts:
+                all_tools_parts.append("---\n\n# Key Concepts & Glossary\n\n")
+                all_tools_parts.append(st.session_state.key_concepts + "\n\n")
+
+            combined = "\n".join(all_tools_parts)
+            st.download_button(
+                "📦 Download All Study Materials",
+                combined,
+                file_name=f"study_materials_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                mime="text/markdown",
+                type="primary",
+            )
