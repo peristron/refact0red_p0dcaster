@@ -1,226 +1,139 @@
 # 🎧 PodcastLM Studio
 
-**The open-source alternative to Google's NotebookLM Audio Overview.**
+**The open-source, privacy-first alternative to Google's NotebookLM.**
 
-Turn any article, PDF, YouTube video, or text into a fully voiced, two-host podcast — with studio-quality mixing, background music, and caller segments. Runs entirely on your own API keys. No Google account required. No data leaves your control.
+Turn any article, PDF, YouTube video, or text into a **fully voiced, two-host podcast**—complete with studio mixing, background music, and caller segments. Plus, generate comprehensive **Study Guides, Flashcards, and Briefings** from your source material.
 
-**[Live Demo →](https://your-app-url.streamlit.app)** · **[Deploy Your Own ↓](#deploy-in-60-seconds)**
-
----
-
-## Why This Exists
-
-Google's NotebookLM showed the world that AI-generated podcasts can sound surprisingly good. But it's a closed system — your documents go to Google, you get what Google gives you back, and you have zero control over the output.
-
-PodcastLM Studio takes the same idea and rips it wide open:
-
-| | Google NotebookLM | PodcastLM Studio |
-|---|---|---|
-| **Source code** | Closed, proprietary | Fully open source (MIT) |
-| **Your data** | Processed on Google servers | Processed via API keys *you* own |
-| **LLM provider** | Google Gemini only | DeepSeek, OpenAI, xAI Grok — your choice |
-| **Script editing** | None — take what you get | Full line-by-line editing, rewriting, reordering |
-| **Voice control** | No customization | 6 voices, per-speaker speed, HD toggle |
-| **Background music** | None | 4 presets + custom upload, intro/outro support |
-| **Caller segments** | Not available | Built-in phone-effect caller with custom questions |
-| **Language support** | English only | 20+ languages including Urdu, Arabic, Hebrew, Hindi |
-| **Cost transparency** | Hidden (bundled into Google One) | Live cost calculator — most podcasts cost $0.15–$1.00 |
-| **Privacy mode** | Not available | One-click source text wipe after generation |
-| **Export options** | Audio only | Audio + Markdown script + plain text + SRT subtitles |
-| **Deployment** | Google Cloud only | One-click deploy to Streamlit Community Cloud (free) |
-
-**You own every piece of this pipeline.** Fork it, modify it, host it wherever you want.
+Runs entirely on your own API keys. No Google account required. No data leaves your control.
 
 ---
 
-## What It Does
+### Why This Exists
 
-1. **Ingest anything** — PDFs, DOCX, PPTX, web articles, YouTube videos, audio files, or raw text
-2. **Research your source** — AI chat assistant that answers questions using *only* your uploaded material
-3. **Generate a script** — Natural two-host conversation with humor, tangents, and back-and-forth
-4. **Edit and rehearse** — Line-by-line script editor with per-line audio preview
-5. **Produce the final podcast** — Parallel TTS generation, background music mixing, phone-effect caller segments, loudness normalization, intro/outro support
-6. **Export everything** — Download the podcast MP3, the script (Markdown or plain text), and SRT subtitles
+Google's NotebookLM showed the world that AI-generated podcasts can sound surprisingly good. But it's a closed system—your documents go to Google, you get what Google gives you back, and you have zero control over the output.
 
-All of this runs in your browser. No installation required.
+**PodcastLM Studio** takes the same idea and rips it wide open:
 
----
+| Feature | Google NotebookLM | PodcastLM Studio |
+| :--- | :--- | :--- |
+| **Source Code** | Closed, proprietary | **Fully Open Source (MIT)** |
+| **Data Privacy** | Processed on Google servers | **Your keys, your control** (Privacy Mode available) |
+| **LLM Provider** | Gemini only | **DeepSeek, OpenAI, Grok** — your choice |
+| **Audio Cost** | Free (bundled) | **Free (Edge TTS)** or Paid (OpenAI HD) |
+| **Script Editing** | None — take what you get | **Full line-by-line editing**, rewriting, reordering |
+| **Study Tools** | On-screen only | **Downloadable** (PDF/DOCX/Markdown) Study Guides, Flashcards & more |
+| **Voices** | No customization | **300+ Voices** (Edge) or 6 HD Voices (OpenAI) |
+| **Caller Segments** | Not available | **Built-in phone-effect caller** with custom questions |
+| **Languages** | Limited | **20+ Languages** (Urdu, Arabic, Hindi, Japanese, etc.) |
+| **Deployment** | Google Cloud only | **Run Locally** or on Streamlit Cloud |
 
-## Features
-
-### 🧠 Multi-Provider Intelligence
-Choose your LLM:
-- **DeepSeek-V3** (default) — best quality-to-cost ratio (~$0.03/script)
-- **DeepSeek-R1** — reasoning model for complex source material
-- **GPT-4o-mini** — fast, reliable, supports longest outputs
-- **xAI Grok 4.1** — latest reasoning model from xAI
-
-Budget Mode forces GPT-4o-mini regardless of selection (~90% cheaper).
-
-### 🎙️ Studio-Quality Audio
-- 6 OpenAI TTS voices in 3 curated pairs (Dynamic, Calm, Formal)
-- **TTS-1-HD toggle** for noticeably better voice quality
-- **Per-speaker speed control** — Host 1, Host 2, and Caller each get independent sliders
-- Phone-effect processing on caller segments (bandpass filter + echo)
-- Loudness normalization (EBU R128: -16 LUFS)
-- Background music with 4 presets or custom upload
-- Optional 5-second music ramp-up before dialogue
-- Custom intro/outro clip support
-
-### 🌐 20+ Languages
-English (US/UK) · Spanish · French · German · Italian · Portuguese · Hindi · Urdu · Arabic · Hebrew · Russian · Turkish · Japanese · Korean · Chinese (Mandarin) · Polish · Dutch · Swedish · Indonesian · Thai
-
-Script generation and TTS work natively in all supported languages.
-
-### 🔒 Privacy-First Design
-- Your documents are processed in-session only — nothing is stored server-side
-- **Privacy Mode** wipes source text from memory immediately after script generation
-- All API keys live in Streamlit Secrets — never committed to the repo
-- No analytics, no tracking, no telemetry
-
-### 💾 Session Persistence
-- Save your entire session (source text, script, chat history) as a JSON file
-- Restore any saved session later — no work lost if your browser tab closes
-
-### 📦 Export Options
-- **MP3 podcast** with timestamped filename
-- **Markdown script** for blog posts or show notes
-- **Plain text script** for accessibility
-- **SRT subtitles** with estimated timestamps — ready for video overlay
+You own every piece of this pipeline. Fork it, modify it, host it wherever you want.
 
 ---
 
-## Deploy in 60 Seconds
+### What It Does
 
-### Option 1: One-Click Deploy (Recommended)
+1.  **Ingest Anything** — PDFs, DOCX, PPTX, web articles, YouTube videos, audio files, or raw text.
+2.  **Research** — Chat with your source material using a RAG-style assistant that never hallucinates outside your docs.
+3.  **Generate Script** — Creates a natural two-host conversation with humor, tangents, and "human" interruptions.
+4.  **Produce Audio** — Parallellized TTS generation + background music mixing + loudness normalization.
+5.  **Study** — Generate academic-quality study materials (Flashcards, Timelines, Glossaries).
 
-[![Deploy to Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://share.streamlit.io/deploy)
+---
 
-1. Fork this repo
-2. Go to [share.streamlit.io](https://share.streamlit.io)
-3. **New app** → connect your fork → set the main file to `p0dcaster_appv2.py`
-4. In **Settings → Secrets**, paste:
+### Features
 
-```toml
-APP_PASSWORD = "your-chosen-password"
-OPENAI_API_KEY = "sk-..."
-DEEPSEEK_API_KEY = "sk-..."
-XAI_API_KEY = "xai-..."
+#### 📚 Intelligent Study Tools (New!)
+Go beyond the audio. Generate deeply structured study materials from your source text and download them in **Markdown, Word (.docx), or Plain Text**:
+*   **Study Guide:** Summaries, key takeaways, and review questions.
+*   **Briefing Document:** Executive-style findings and implications.
+*   **Flashcards:** Front/Back concepts (formatted for Anki/Quizlet).
+*   **Timeline:** Chronological breakdown of events.
+*   **FAQ & Glossary:** Key definitions and common questions.
 
-    Deploy. That's it.
+#### 🎙️ Studio-Quality Audio
+*   **Edge TTS (Free):** Use Microsoft's neural voices for $0 cost.
+*   **OpenAI HD:** Toggle `TTS-1-HD` for ultra-realistic breathing and intonation.
+*   **Fine-Grained Control:** Adjust speaking speed per host (e.g., Host 1 @ 1.0x, Caller @ 0.95x).
+*   **Production Suite:** Automatic background music ducking, intro/outro clips, and "phone-call" EQ filters for guest callers.
 
-    Note: Only OPENAI_API_KEY is required (for TTS/Whisper). DEEPSEEK_API_KEY is strongly recommended (default LLM). XAI_API_KEY is optional.
+#### 🧠 Multi-Provider Intelligence
+*   **DeepSeek-V3:** The default engine. Incredible creative writing at 1/10th the cost of GPT-4.
+*   **GPT-4o-mini:** Fast, cheap, and handles massive contexts.
+*   **xAI Grok:** Optional integration for high-speed reasoning.
 
-Option 2: Run Locally
+#### 🔒 Privacy-First
+*   **Client-Side Logic:** Your documents are processed in memory during the session only.
+*   **Privacy Mode:** One-click wipe of source text from memory immediately after script generation.
+*   **Session State:** Save your work as a `.json` file to your local machine and restore it later. Nothing is stored in a database.
 
-Bash
+---
 
-git clone https://github.com/your-username/podcastlm-studio.git
-cd podcastlm-studio
-pip install -r requirements.txt
-# Create .streamlit/secrets.toml with your keys (see above)
-streamlit run p0dcaster_appv2.py
+### Quick Start
 
-Requires ffmpeg installed on your system (brew install ffmpeg / apt install ffmpeg).
-Cost Breakdown
+#### Option 1: Run Locally (Recommended)
 
-The app shows a live cost estimate in the sidebar — before and after script generation.
-Podcast Length	LLM (DeepSeek-V3)	TTS (Standard)	TTS (HD)	Total
-Short (2 min)	~$0.03	~$0.07	~$0.13	$0.10–$0.16
-Medium (5 min)	~$0.03	~$0.18	~$0.36	$0.21–$0.39
-Long (15 min)	~$0.03	~$0.50	~$1.00	$0.53–$1.03
-Extra Long (30 min)	~$0.03	~$1.00	~$2.00	$1.03–$2.03
+1.  **Clone the repo:**
+    ```bash
+    git clone https://github.com/your-username/podcastlm-studio.git
+    cd podcastlm-studio
+    ```
 
-Using GPT-4o-mini adds ~$0.07. Using Grok adds ~$0.27. Still cheaper than a coffee.
-Architecture
+2.  **Install dependencies:**
+    ```bash
+    pip install streamlit openai edge-tts yt-dlp ffmpeg-python beautifulsoup4 python-docx python-pptx pypdf2 requests
+    ```
 
-text
+3.  **Run the app:**
+    ```bash
+    streamlit run p0dcaster_appv2.py
+    ```
 
-┌─────────────────────────────────────────────────┐
-│                   Browser (Streamlit)            │
-├──────────┬──────────┬──────────┬────────────────┤
-│ 📄 Source │ 💬 Chat  │ 📝 Script│  🎚️ Produce   │
-│          │          │          │                │
-│ PDF/DOCX │ Research │ LLM Gen  │ Parallel TTS   │
-│ Web/YT   │ Q&A      │ Edit     │ Phone FX       │
-│ Audio    │          │ Rehearse │ Music Mix       │
-│ Text     │          │ Export   │ Loudnorm        │
-└────┬─────┴────┬─────┴────┬─────┴───────┬────────┘
-     │          │          │             │
-     ▼          ▼          ▼             ▼
-  Whisper   DeepSeek    DeepSeek     OpenAI TTS
-  (OpenAI)  /OpenAI     /OpenAI      + ffmpeg
-            /Grok       /Grok
+*Note: You must have [FFmpeg](https://ffmpeg.org/download.html) installed on your system path for audio mixing.*
 
-All processing happens through standard API calls. The only binary dependency is ffmpeg for audio mixing (installed via packages.txt on Streamlit Cloud).
-Tech Stack
-Component	Technology
-Frontend & hosting	Streamlit (Community Cloud — free)
-Script generation	DeepSeek-V3 / OpenAI GPT-4o-mini / xAI Grok
-Text-to-speech	OpenAI TTS-1 / TTS-1-HD
-Transcription	OpenAI Whisper
-Audio processing	ffmpeg via ffmpeg-python
-Video download	yt-dlp
-Document parsing	PyPDF2, python-docx, python-pptx
-Web scraping	BeautifulSoup4
+#### Option 2: Deploy to Cloud
+1.  Fork this repo.
+2.  Go to [Streamlit Community Cloud](https://share.streamlit.io).
+3.  Connect your fork and set the main file to `p0dcaster_appv2.py`.
+4.  Add your API keys in the dashboard under "Secrets".
 
-No Docker. No microservices. No GPU. Just Python.
-Project Structure
+---
 
-text
+### Cost Breakdown
 
-podcastlm-studio/
-├── p0dcaster_appv2.py        # Main application (single file)
-├── requirements.txt           # Python dependencies
-├── packages.txt               # System packages (ffmpeg)
-├── .gitignore                 # Keeps secrets out of the repo
-└── .streamlit/
-    └── config.toml            # Theme and server settings
+The app includes a live cost estimator.
 
-## Contributing
+| Engine | Audio Provider | Typical Cost (15 min podcast) |
+| :--- | :--- | :--- |
+| **DeepSeek** | **Edge TTS** | **~$0.03** (Total) |
+| **DeepSeek** | **OpenAI Standard** | **~$0.53** |
+| **GPT-4o** | **OpenAI HD** | **~$2.50** |
 
-Open an issue or PR if you want to:
+**Cheapest Setup:** DeepSeek + Edge TTS = Practically free.
 
-- 🆓 **Integrate Edge TTS** — free Microsoft TTS, would eliminate voice costs entirely
-- 🗣️ **Integrate ElevenLabs** — best-in-class voice quality, subscription pricing
-- ☁️ **Add Google Cloud / Azure TTS** — 73% cheaper than OpenAI at scale
-- 🎵 Add new background music presets
-- 🎬 Add export-to-video with burned-in subtitles
-- 🌍 Improve non-Latin script rendering
-- 🧪 Add automated tests
-- 📱 Improve mobile layout
+---
 
-The biggest cost-reduction win is a free TTS integration. If you've worked with `edge-tts` or Piper, your PR would make this tool genuinely free to run.
+### Tech Stack
 
-All contributions welcome. This is a community project.
-FAQ
+*   **Frontend:** Streamlit
+*   **LLMs:** DeepSeek / OpenAI / Grok
+*   **Audio:** Edge TTS (free) / OpenAI TTS (paid)
+*   **Processing:** FFmpeg (via `ffmpeg-python`)
+*   **Parsing:** `PyPDF2`, `python-docx`, `BeautifulSoup4`, `yt-dlp`
 
-Q: Do I need all three API keys?
-A: Only OPENAI_API_KEY is required — it powers TTS and Whisper transcription. DEEPSEEK_API_KEY is strongly recommended as the default script engine. XAI_API_KEY is entirely optional.
+---
 
-Q: How is this different from NotebookLM?
-A: NotebookLM is a closed Google product — your data goes to Google, you get a fixed output, and you can't customize anything. PodcastLM Studio is open source, runs on API keys you control, and gives you full editorial control over the script, voices, pacing, and production.
+### Contributing
 
-Q: Can I use this commercially?
-A: The code is MIT-licensed — do whatever you want with it. Check the terms of service for whichever API providers you use (OpenAI, DeepSeek, xAI).
+Open an issue or PR! We are looking for:
+- 🗣️ **ElevenLabs Integration** (For premium voice cloning)
+- ☁️ **Azure / Google TTS** (Mid-tier pricing options)
+- 📱 **Mobile UI improvements**
 
-Q: Why DeepSeek as the default?
-A: DeepSeek-V3 offers the best quality-to-cost ratio for script generation — roughly 10× cheaper than Grok and 3× cheaper than GPT-4o-mini, with comparable or better output quality for creative writing tasks.
+---
 
-Q: What if the script gets cut off?
-A: The app automatically detects truncated output and recovers all complete dialogue lines. You'll see a warning with the number of recovered lines. Try a shorter duration setting or switch to GPT-4o-mini (which supports longer outputs) if this happens frequently.
+### License
 
-Q: Is my data private?
-A: Your documents are processed in-session via API calls to the providers you choose. Nothing is stored on the Streamlit server. Enable Privacy Mode to wipe source text from memory immediately after script generation.
-License
+**MIT License.** Use it, fork it, sell it, change it. It's yours.
 
-MIT — use it however you want.
-Acknowledgments
-
-Built with late-night caffeine and the belief that podcast creation should be open, affordable, and controllable.
-
-Inspired by the AI podcasting wave of 2025 — but built for people who want to own their tools.
-
-⭐ Star this repo if it saved you hours of editing.
-
-Made with 🎧 and open-source conviction.
+*Made with 🎧 and open-source conviction.*
