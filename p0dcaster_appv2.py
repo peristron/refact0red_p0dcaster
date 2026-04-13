@@ -6,6 +6,7 @@ Features: HD TTS, Edge TTS (free), per-speaker speed, script export,
 session save/restore, SRT subtitles, DeepSeek as default LLM,
 truncation recovery, NotebookLM-style study tools.
 Updates: Multi-format export for study tools (MD, DOCX, TXT).
+Improvements: Persistent downloads, better UI/UX, progress indicators.
 """
 
 import streamlit as st
@@ -244,6 +245,10 @@ _DEFAULTS: Dict[str, Any] = {
     "flashcards": None,
     "timeline": None,
     "key_concepts": None,
+    # NEW: Persistent production outputs
+    "podcast_audio_bytes": None,
+    "podcast_srt_content": None,
+    "podcast_metadata": None,
 }
 
 for _k, _v in _DEFAULTS.items():
@@ -266,7 +271,7 @@ def check_password() -> None:
     if hmac.compare_digest(entered, expected):
         st.session_state.authenticated = True
     else:
-        st.error("Incorrect password.")
+        st.error("❌ Incorrect password.")
 
 
 if not st.session_state.authenticated:
@@ -513,7 +518,7 @@ def translate_if_needed(text: str, target_lang: str, openai_key: str) -> str:
     if not any(lang in target_lang for lang in NON_ENGLISH_LANGS):
         return text
     if not openai_key:
-        st.warning("OpenAI key required for translation — using original text.")
+        st.warning("⚠️ OpenAI key required for translation — using original text.")
         return text
     try:
         oai = OpenAI(api_key=openai_key)
@@ -524,7 +529,7 @@ def translate_if_needed(text: str, target_lang: str, openai_key: str) -> str:
         )
         return res.choices[0].message.content
     except Exception as e:
-        st.warning(f"Translation failed, using original: {e}")
+        st.warning(f"⚠️ Translation failed, using original: {e}")
         return text
 
 
@@ -572,7 +577,7 @@ def generate_study_tool(
 
         return cleaned.strip()
     except Exception as e:
-        st.error(f"Generation failed: {e}")
+        st.error(f"❌ Generation failed: {e}")
         return None
 
 
@@ -616,7 +621,7 @@ def generate_tts(
         return p.exists() and p.stat().st_size > 0
     except Exception as e:
         logger.error("TTS failed for voice %s: %s", voice, e)
-        st.warning(f"TTS failed for voice '{voice}': {e}")
+        st.warning(f"⚠️ TTS failed for voice '{voice}': {e}")
         return False
 
 
@@ -688,7 +693,7 @@ def download_file(url: str, save_path: str) -> bool:
                 f.write(chunk)
         return True
     except Exception as e:
-        st.warning(f"Download failed: {e}")
+        st.warning(f"⚠️ Download failed: {e}")
         return False
 
 
@@ -715,7 +720,7 @@ def mix_final_audio(
     for i, line in enumerate(script_dialogue):
         seg_path = tmp / f"{i}.mp3"
         if not seg_path.exists() or seg_path.stat().st_size == 0:
-            st.warning(f"Skipping missing/empty segment {i}.")
+            st.warning(f"⚠️ Skipping missing/empty segment {i}.")
             continue
         if line["speaker"] == "Caller":
             phone_path = tmp / f"phone_{i}.mp3"
@@ -725,7 +730,7 @@ def mix_final_audio(
             inputs.append(ffmpeg.input(str(seg_path)))
 
     if not inputs:
-        st.error("No valid audio segments to mix.")
+        st.error("❌ No valid audio segments to mix.")
         return None
 
     if len(inputs) > 1:
@@ -773,14 +778,14 @@ def mix_final_audio(
         )
     except ffmpeg.Error as e:
         stderr = e.stderr.decode(errors="ignore") if e.stderr else "unknown"
-        st.warning(f"Advanced mix failed — falling back.\n```\n{stderr}\n```")
+        st.warning(f"⚠️ Advanced mix failed — falling back.\n```\n{stderr}\n```")
         try:
             simple = ffmpeg.concat(*inputs, v=0, a=1, n=len(inputs))
             ffmpeg.output(simple, str(out_path), acodec="mp3", audio_bitrate=AUDIO_BITRATE).run(
                 overwrite_output=True, quiet=True,
             )
         except Exception as e2:
-            st.error(f"Fallback concat also failed: {e2}")
+            st.error(f"❌ Fallback concat also failed: {e2}")
             return None
 
     return out_path if out_path.exists() else None
@@ -801,7 +806,7 @@ def scrape_website(url: str) -> Optional[str]:
         text = soup.get_text(separator="\n", strip=True)
         return text if text else None
     except Exception as e:
-        st.warning(f"Scraping failed: {e}")
+        st.warning(f"⚠️ Scraping failed: {e}")
         return None
 
 
@@ -833,22 +838,22 @@ def extract_text_from_files(files, audio_client: Optional[OpenAI] = None) -> str
 
             elif name.endswith((".mp3", ".wav", ".m4a", ".mp4", ".webm")):
                 if not audio_client:
-                    st.warning(f"OpenAI key required to transcribe {file.name}")
+                    st.warning(f"⚠️ OpenAI key required to transcribe {file.name}")
                 elif len(raw) > WHISPER_MAX_BYTES:
                     st.warning(
                         f"⚠️ {file.name} is {len(raw) / 1_048_576:.1f} MB — "
                         f"exceeds Whisper's 25 MB limit. Skipping."
                     )
                 else:
-                    with st.spinner(f"Transcribing {file.name}…"):
+                    with st.spinner(f"🎙️ Transcribing {file.name}…"):
                         transcript = audio_client.audio.transcriptions.create(
                             model="whisper-1", file=(file.name, raw),
                         )
                         parts.append(transcript.text)
             else:
-                st.warning(f"Unsupported file type: {file.name}")
+                st.warning(f"⚠️ Unsupported file type: {file.name}")
         except Exception as e:
-            st.error(f"Error reading {file.name}: {e}")
+            st.error(f"❌ Error reading {file.name}: {e}")
 
     return "\n".join(parts)
 
@@ -1038,11 +1043,11 @@ with st.sidebar:
                     st.session_state.timeline = restored.get("timeline")
                     st.session_state.key_concepts = restored.get("key_concepts")
                     st.success(
-                        f"Session restored (saved {restored.get('exported_at', 'unknown')})"
+                        f"✅ Session restored (saved {restored.get('exported_at', 'unknown')})"
                     )
                     st.rerun()
             except Exception as e:
-                st.error(f"Invalid session file: {e}")
+                st.error(f"❌ Invalid session file: {e}")
 
     # --- Cost estimate ---
     st.divider()
@@ -1111,6 +1116,7 @@ audio_client: Optional[OpenAI] = OpenAI(api_key=openai_key) if openai_key else N
 # Main tabs
 # ---------------------------------------------------------------------------
 st.title("🎧 PodcastLM Studio")
+
 # ---------------------------------------------------------------------------
 # In-app guide
 # ---------------------------------------------------------------------------
@@ -1214,6 +1220,7 @@ You can generate them one at a time or click **🚀 Generate All** to create eve
 
 *Need help? Open an issue on the [GitHub repo](https://github.com/your-username/podcastlm-studio).*
     """)
+
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["📄 Source", "💬 Research Chat", "📝 Script & Rehearsal", "🎚️ Produce", "📚 Study Tools"],
 )
@@ -1221,7 +1228,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 
 # === TAB 1 — SOURCE =========================================================
 with tab1:
-    st.info("Upload content — this drives the research chat, podcast, and study tools.")
+    st.info("📥 Upload content — this drives the research chat, podcast, and study tools.")
     input_type = st.radio(
         "Input Type", ["Files", "Web URL", "Video URL", "Text"], horizontal=True,
     )
@@ -1233,26 +1240,26 @@ with tab1:
             accept_multiple_files=True,
             type=["pdf", "docx", "pptx", "txt", "mp3", "wav", "m4a", "mp4", "webm"],
         )
-        if files and st.button("Process Files"):
-            with st.spinner("Extracting text…"):
+        if files and st.button("⚡ Process Files"):
+            with st.spinner("🔄 Extracting text…"):
                 new_text = extract_text_from_files(files, audio_client)
 
     elif input_type == "Web URL":
         url = st.text_input("Article URL")
-        if url and st.button("Scrape"):
-            with st.spinner("Scraping…"):
+        if url and st.button("🌐 Scrape"):
+            with st.spinner("🔄 Scraping…"):
                 new_text = scrape_website(url) or ""
 
     elif input_type == "Video URL":
         vid_url = st.text_input("YouTube / Video URL")
-        if vid_url and st.button("Transcribe"):
+        if vid_url and st.button("🎬 Transcribe"):
             if not audio_client:
-                st.error("OpenAI key required for transcription.")
+                st.error("❌ OpenAI key required for transcription.")
             else:
-                with st.spinner("Downloading & transcribing video…"):
+                with st.spinner("🔄 Downloading & transcribing video…"):
                     text, err = download_and_transcribe_video(vid_url, audio_client)
                     if err:
-                        st.error(f"Transcription error: {err}")
+                        st.error(f"❌ Transcription error: {err}")
                     new_text = text or ""
 
     elif input_type == "Text":
@@ -1284,14 +1291,14 @@ with tab1:
 with tab2:
     st.header("💬 Research Chat")
     if not st.session_state.source_text:
-        st.info("Load source content in the **Source** tab first.")
+        st.info("📄 Load source content in the **Source** tab first.")
     else:
         for entry in st.session_state.chat_history:
             role = "user" if entry["role"] == "user" else "assistant"
             with st.chat_message(role):
                 st.markdown(entry["content"])
 
-        user_question = st.chat_input("Ask about the source material…")
+        user_question = st.chat_input("💭 Ask about the source material…")
         if user_question:
             st.session_state.chat_history.append(
                 {"role": "user", "content": user_question},
@@ -1322,7 +1329,7 @@ with tab2:
                     *st.session_state.chat_history,
                 ]
                 with st.chat_message("assistant"):
-                    with st.spinner("Thinking…"):
+                    with st.spinner("🤔 Thinking…"):
                         try:
                             response = client.chat.completions.create(
                                 model=model, messages=messages, max_tokens=1024,
@@ -1333,7 +1340,7 @@ with tab2:
                                 {"role": "assistant", "content": ai_reply},
                             )
                         except Exception as e:
-                            st.error(f"LLM error: {e}")
+                            st.error(f"❌ LLM error: {e}")
 
         if st.button("🗑️ Clear Chat"):
             st.session_state.chat_history = []
@@ -1347,16 +1354,18 @@ with tab3:
         user_instructions = st.text_area(
             "🎬 Director Notes",
             placeholder="e.g., Make it funny, focus on the key findings",
+            help="Give the AI creative direction for tone, style, and focus"
         )
     with col_call:
         caller_prompt = st.text_area(
             "📞 Caller Question (optional)",
             placeholder="e.g., What does this mean for everyday people?",
+            help="Add a phone-in caller who asks a specific question"
         )
 
     if st.button("✨ Generate Script", type="primary"):
         if not st.session_state.source_text:
-            st.error("Load source content first (Tab 1).")
+            st.error("❌ Load source content first (Tab 1).")
         else:
             client, model, err = get_llm_client(
                 model_choice, _resolve_model_name(),
@@ -1365,7 +1374,7 @@ with tab3:
             if err:
                 st.error(err)
             else:
-                with st.spinner("Writing script… this may take 30–90 seconds."):
+                with st.spinner("✍️ Writing script… this may take 30–90 seconds."):
                     target_words = WORD_TARGETS[length_option]
                     translated = translate_if_needed(
                         user_instructions, language, openai_key,
@@ -1466,14 +1475,14 @@ Source material:
                                 st.info("🔒 Source text wiped (Privacy Mode).")
                         else:
                             st.error(
-                                f"Could not parse or repair the script output.\n\n"
+                                f"❌ Could not parse or repair the script output.\n\n"
                                 f"Raw output (first 500 chars):\n"
                                 f"```\n{raw[:500]}\n```\n\n"
                                 f"**Try:** shorter Duration, or Budget Mode (GPT-4o-mini)."
                             )
 
                     except Exception as e:
-                        st.error(f"Script generation failed: {e}")
+                        st.error(f"❌ Script generation failed: {e}")
 
     # --- Display, edit, export script ---
     if st.session_state.script_data:
@@ -1483,7 +1492,7 @@ Source material:
 
         st.subheader(data.get("title", "Untitled Podcast"))
         st.caption(
-            f"{len(dialogue)} lines · ~{word_count:,} words · "
+            f"📊 {len(dialogue)} lines · ~{word_count:,} words · "
             f"est. {word_count // 150} min"
         )
 
@@ -1533,13 +1542,14 @@ Source material:
 
                 if st.form_submit_button("💾 Save Edits"):
                     st.session_state.script_data["dialogue"] = new_dialogue
-                    st.success("Saved.")
+                    st.success("✅ Saved.")
                     st.rerun()
 
         # --- Rehearsal ---
         st.subheader("🎧 Live Rehearsal")
+        st.caption("Preview individual lines with the selected voice before full production")
         idx = st.selectbox(
-            "Preview a line",
+            "Select line to preview",
             range(len(dialogue)),
             format_func=lambda i: (
                 f"[{dialogue[i]['speaker']}] {dialogue[i]['text'][:80]}…"
@@ -1555,14 +1565,14 @@ Source material:
 
             if use_edge:
                 with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-                    with st.spinner("Generating voice…"):
+                    with st.spinner("🎙️ Generating voice…"):
                         if _sync_edge_tts(line["text"], voice, tmp.name, speed):
                             st.audio(tmp.name)
                         else:
-                            st.error("Edge TTS preview failed.")
+                            st.error("❌ Edge TTS preview failed.")
             else:
                 if not audio_client:
-                    st.error("OpenAI key required for TTS.")
+                    st.error("❌ OpenAI key required for TTS.")
                 else:
                     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
                         if generate_tts(
@@ -1571,22 +1581,65 @@ Source material:
                         ):
                             st.audio(tmp.name)
                         else:
-                            st.error("TTS preview failed.")
+                            st.error("❌ TTS preview failed.")
 
 
 # === TAB 4 — PRODUCTION =====================================================
 with tab4:
     st.header("🎚️ Final Production")
 
-    if not st.session_state.script_data:
-        st.info("Generate a script in the **Script & Rehearsal** tab first.")
+    # Display existing podcast if available
+    if st.session_state.podcast_audio_bytes:
+        st.success("✅ Podcast ready!")
+        metadata = st.session_state.podcast_metadata or {}
+        
+        col_info1, col_info2, col_info3 = st.columns(3)
+        with col_info1:
+            st.metric("Duration", f"~{metadata.get('duration_min', '?')} min")
+        with col_info2:
+            st.metric("File Size", f"{metadata.get('size_mb', '?')} MB")
+        with col_info3:
+            st.metric("Audio Quality", metadata.get('quality', '?'))
+        
+        st.audio(st.session_state.podcast_audio_bytes, format="audio/mp3")
+        
+        st.divider()
+        st.subheader("📥 Downloads")
+        
+        dl_c1, dl_c2 = st.columns(2)
+        with dl_c1:
+            st.download_button(
+                "⬇️ Download Podcast",
+                st.session_state.podcast_audio_bytes,
+                file_name=f"podcast_{datetime.now().strftime('%Y%m%d_%H%M')}.mp3",
+                mime="audio/mp3",
+                use_container_width=True,
+            )
+        with dl_c2:
+            if st.session_state.podcast_srt_content:
+                st.download_button(
+                    "🎬 Download Subtitles",
+                    st.session_state.podcast_srt_content,
+                    file_name=f"podcast_{datetime.now().strftime('%Y%m%d_%H%M')}.srt",
+                    mime="text/srt",
+                    use_container_width=True,
+                )
+        
+        if st.button("🔄 Generate New Podcast"):
+            st.session_state.podcast_audio_bytes = None
+            st.session_state.podcast_srt_content = None
+            st.session_state.podcast_metadata = None
+            st.rerun()
+
+    elif not st.session_state.script_data:
+        st.info("📝 Generate a script in the **Script & Rehearsal** tab first.")
 
     elif st.button("🚀 Produce Final Podcast", type="primary"):
         if not use_edge and not openai_key:
-            st.error("OpenAI key required for TTS production. Or switch to Edge TTS (Free).")
+            st.error("❌ OpenAI key required for TTS production. Or switch to Edge TTS (Free).")
             st.stop()
 
-        progress = st.progress(0, text="Starting production…")
+        progress = st.progress(0, text="🎬 Starting production…")
         status = st.empty()
 
         tts_client = OpenAI(api_key=openai_key) if (not use_edge and openai_key) else None
@@ -1615,13 +1668,13 @@ with tab4:
                     completed += 1
                     progress.progress(
                         completed / len(script),
-                        text=f"Voicing line {completed}/{len(script)}…",
+                        text=f"🎙️ Voicing line {completed}/{len(script)}…",
                     )
                     if not ok:
                         tts_errors.append(f"Line {i}: {err_msg}")
 
             for err in tts_errors:
-                st.warning(err)
+                st.warning(f"⚠️ {err}")
 
             status.text("🎛️ Mixing final podcast…")
             out_path = mix_final_audio(
@@ -1633,34 +1686,32 @@ with tab4:
                 with open(out_path, "rb") as f:
                     audio_bytes = f.read()
 
-                progress.progress(1.0, text="✅ Complete!")
-                status.empty()
-                st.audio(audio_bytes, format="audio/mp3")
-
-                dl_c1, dl_c2 = st.columns(2)
-                with dl_c1:
-                    st.download_button(
-                        "⬇️ Download Podcast",
-                        audio_bytes,
-                        file_name=f"podcast_{datetime.now().strftime('%Y%m%d_%H%M')}.mp3",
-                        mime="audio/mp3",
-                    )
-                with dl_c2:
-                    st.download_button(
-                        "🎬 Download Subtitles",
-                        generate_srt(script),
-                        file_name=f"podcast_{datetime.now().strftime('%Y%m%d_%H%M')}.srt",
-                        mime="text/srt",
-                    )
-
+                # Store in session state
+                st.session_state.podcast_audio_bytes = audio_bytes
+                st.session_state.podcast_srt_content = generate_srt(script)
+                
+                # Store metadata
                 duration_est = sum(len(l["text"].split()) for l in script) / 150
                 size_mb = len(audio_bytes) / 1_048_576
                 tts_label = "Edge TTS (free)" if use_edge else ("HD audio" if tts_hd else "Standard TTS")
+                
+                st.session_state.podcast_metadata = {
+                    "duration_min": f"{duration_est:.0f}",
+                    "size_mb": f"{size_mb:.1f}",
+                    "quality": tts_label,
+                }
+
+                progress.progress(1.0, text="✅ Production complete!")
+                status.empty()
+                
                 st.success(
-                    f"🎉 Done! ~{duration_est:.0f} min · {size_mb:.1f} MB · {tts_label}"
+                    f"🎉 Podcast produced! ~{duration_est:.0f} min · {size_mb:.1f} MB · {tts_label}"
                 )
+                st.rerun()
             else:
-                st.error("Production failed — check warnings above.")
+                st.error("❌ Production failed — check warnings above.")
+                progress.empty()
+                status.empty()
 
 
 # === TAB 5 — STUDY TOOLS ====================================================
@@ -1672,7 +1723,7 @@ with tab5:
     )
 
     if not st.session_state.source_text:
-        st.info("Load source content in the **Source** tab first.")
+        st.info("📄 Load source content in the **Source** tab first.")
     else:
         # Count how many tools have been generated
         tool_state_keys = {
@@ -1686,7 +1737,7 @@ with tab5:
         generated_count = sum(
             1 for k in tool_state_keys.values() if st.session_state.get(k)
         )
-        st.caption(f"{generated_count}/{len(tool_state_keys)} tools generated for current source.")
+        st.caption(f"📊 {generated_count}/{len(tool_state_keys)} tools generated for current source.")
 
         # --- Generate All button ---
         if st.button("🚀 Generate All Study Tools", type="primary"):
@@ -1697,20 +1748,20 @@ with tab5:
             if err:
                 st.error(err)
             else:
-                progress = st.progress(0, text="Generating study tools…")
+                progress = st.progress(0, text="🔄 Generating study tools…")
                 tools_list = list(tool_state_keys.items())
 
                 for idx, (tool_name, state_key) in enumerate(tools_list):
                     if st.session_state.get(state_key):
                         progress.progress(
                             (idx + 1) / len(tools_list),
-                            text=f"Skipping {tool_name} (already generated)…",
+                            text=f"⏭️ Skipping {tool_name} (already generated)…",
                         )
                         continue
 
                     progress.progress(
                         (idx + 1) / len(tools_list),
-                        text=f"Generating {tool_name}…",
+                        text=f"✍️ Generating {tool_name}…",
                     )
 
                     is_json = tool_name == "Flashcards"
@@ -1750,7 +1801,7 @@ with tab5:
                 if err:
                     st.error(err)
                 else:
-                    with st.spinner("Generating study guide…"):
+                    with st.spinner("✍️ Generating study guide…"):
                         result = generate_study_tool(
                             client, model, st.session_state.source_text,
                             "Study Guide", language,
@@ -1793,7 +1844,7 @@ with tab5:
                 if err:
                     st.error(err)
                 else:
-                    with st.spinner("Generating briefing document…"):
+                    with st.spinner("✍️ Generating briefing document…"):
                         result = generate_study_tool(
                             client, model, st.session_state.source_text,
                             "Briefing Document", language,
@@ -1836,7 +1887,7 @@ with tab5:
                 if err:
                     st.error(err)
                 else:
-                    with st.spinner("Generating FAQ…"):
+                    with st.spinner("✍️ Generating FAQ…"):
                         result = generate_study_tool(
                             client, model, st.session_state.source_text,
                             "FAQ", language,
@@ -1879,7 +1930,7 @@ with tab5:
                 if err:
                     st.error(err)
                 else:
-                    with st.spinner("Generating flashcards…"):
+                    with st.spinner("✍️ Generating flashcards…"):
                         result = generate_study_tool(
                             client, model, st.session_state.source_text,
                             "Flashcards", language, is_json=True,
@@ -1949,7 +2000,7 @@ with tab5:
                 if err:
                     st.error(err)
                 else:
-                    with st.spinner("Generating timeline…"):
+                    with st.spinner("✍️ Generating timeline…"):
                         result = generate_study_tool(
                             client, model, st.session_state.source_text,
                             "Timeline", language,
@@ -1992,7 +2043,7 @@ with tab5:
                 if err:
                     st.error(err)
                 else:
-                    with st.spinner("Generating key concepts…"):
+                    with st.spinner("✍️ Generating key concepts…"):
                         result = generate_study_tool(
                             client, model, st.session_state.source_text,
                             "Key Concepts", language,
