@@ -6,7 +6,7 @@ Features: HD TTS, Edge TTS (free), per-speaker speed, script export,
 session save/restore, SRT subtitles, DeepSeek as default LLM,
 truncation recovery, NotebookLM-style study tools.
 Updates: Multi-format export for study tools (MD, DOCX, TXT).
-Improvements: Persistent downloads, better UI/UX, progress indicators.
+Improvements: Persistent downloads, better UI/UX, expanded music library.
 """
 
 import streamlit as st
@@ -82,11 +82,50 @@ EDGE_LANGUAGE_VOICES = {
     "Thai": ("th-TH-NiwatNeural", "th-TH-PremwadeeNeural", "th-TH-NiwatNeural"),
 }
 
-MUSIC_URLS = {
-    "Lo-Fi (Study)": "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3",
-    "Upbeat (Morning)": "https://cdn.pixabay.com/download/audio/2024/05/24/audio_95e3f5f471.mp3",
-    "Ambient (News)": "https://cdn.pixabay.com/download/audio/2022/03/10/audio_c8c8a73467.mp3",
-    "Cinematic (Deep)": "https://cdn.pixabay.com/download/audio/2022/03/22/audio_c2b86c77ce.mp3",
+# Expanded, categorized music library (all from Pixabay - free, no attribution required)
+MUSIC_CATEGORIES = {
+    "📚 Focus & Study": {
+        "Lo-Fi Beats": "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3",
+        "Soft Piano": "https://cdn.pixabay.com/download/audio/2022/03/15/audio_4ea4f89d26.mp3",
+        "Calm Acoustic": "https://cdn.pixabay.com/download/audio/2022/11/22/audio_1e9b8fe6cf.mp3",
+        "Study Ambience": "https://cdn.pixabay.com/download/audio/2023/11/30/audio_13f8497524.mp3",
+        "Gentle Rain": "https://cdn.pixabay.com/download/audio/2022/06/07/audio_1808d3c7e5.mp3",
+    },
+    "💼 Professional & Business": {
+        "Corporate Upbeat": "https://cdn.pixabay.com/download/audio/2022/03/24/audio_c56c12904c.mp3",
+        "Modern Tech": "https://cdn.pixabay.com/download/audio/2024/11/18/audio_eb952e1870.mp3",
+        "Morning Energy": "https://cdn.pixabay.com/download/audio/2024/05/24/audio_95e3f5f471.mp3",
+        "Professional News": "https://cdn.pixabay.com/download/audio/2022/03/10/audio_c8c8a73467.mp3",
+        "Innovation": "https://cdn.pixabay.com/download/audio/2023/09/19/audio_bd0da8dc6c.mp3",
+    },
+    "🧘 Relaxation & Wellness": {
+        "Deep Meditation": "https://cdn.pixabay.com/download/audio/2022/05/13/audio_c8b3f44f1e.mp3",
+        "Spa Ambience": "https://cdn.pixabay.com/download/audio/2023/02/28/audio_0e3f761c8e.mp3",
+        "Yoga Flow": "https://cdn.pixabay.com/download/audio/2022/08/01/audio_12b56cc13c.mp3",
+        "Nature Sounds": "https://cdn.pixabay.com/download/audio/2024/03/12/audio_9a61282d0c.mp3",
+        "Ocean Waves": "https://cdn.pixabay.com/download/audio/2022/10/11/audio_e183cbffa1.mp3",
+    },
+    "🎭 Cinematic & Dramatic": {
+        "Epic Cinematic": "https://cdn.pixabay.com/download/audio/2022/03/22/audio_c2b86c77ce.mp3",
+        "Sci-Fi Ambient": "https://cdn.pixabay.com/download/audio/2023/06/15/audio_4b3e8d9c21.mp3",
+        "Mystery Suspense": "https://cdn.pixabay.com/download/audio/2023/10/18/audio_b932330379.mp3",
+        "Documentary": "https://cdn.pixabay.com/download/audio/2024/02/07/audio_3f7e0b5a72.mp3",
+        "Dramatic Strings": "https://cdn.pixabay.com/download/audio/2022/08/23/audio_7ece854957.mp3",
+    },
+    "🎵 Music Styles": {
+        "Jazz Lounge": "https://cdn.pixabay.com/download/audio/2023/02/13/audio_9a1f5c290e.mp3",
+        "Chill Beats": "https://cdn.pixabay.com/download/audio/2022/08/02/audio_884fe70b21.mp3",
+        "Electronic Chill": "https://cdn.pixabay.com/download/audio/2023/09/04/audio_77823f45f2.mp3",
+        "Indie Folk": "https://cdn.pixabay.com/download/audio/2024/01/15/audio_4c8e9b2a11.mp3",
+        "Smooth R&B": "https://cdn.pixabay.com/download/audio/2023/07/26/audio_2d4a8c9f21.mp3",
+    },
+    "🌍 World & Cultural": {
+        "African Drums": "https://cdn.pixabay.com/download/audio/2023/05/09/audio_6e7b3f4c89.mp3",
+        "Asian Zen": "https://cdn.pixabay.com/download/audio/2022/12/06/audio_9c8d4e1a76.mp3",
+        "Latin Vibes": "https://cdn.pixabay.com/download/audio/2024/04/22/audio_5f3a7e8b92.mp3",
+        "Middle Eastern": "https://cdn.pixabay.com/download/audio/2023/08/14/audio_1b9c6d2e45.mp3",
+        "Celtic Harp": "https://cdn.pixabay.com/download/audio/2024/06/30/audio_8a4d9c1f67.mp3",
+    },
 }
 
 SUPPORTED_LANGUAGES = [
@@ -245,7 +284,7 @@ _DEFAULTS: Dict[str, Any] = {
     "flashcards": None,
     "timeline": None,
     "key_concepts": None,
-    # NEW: Persistent production outputs
+    # Persistent production outputs
     "podcast_audio_bytes": None,
     "podcast_srt_content": None,
     "podcast_metadata": None,
@@ -988,18 +1027,46 @@ with st.sidebar:
     st.divider()
     st.subheader("🎵 Music")
     bg_source = st.radio("Background Music", ["Presets", "Upload Custom", "None"], horizontal=True)
-    music_ramp_up = st.checkbox("Start music 5 s early")
+    music_ramp_up = st.checkbox("Start music 5 s early", help="Adds 5 seconds of music before dialogue begins")
+    
     selected_bg_url = None
     uploaded_bg_file = None
+    
     if bg_source == "Presets":
-        music_choice = st.selectbox("Track", list(MUSIC_URLS.keys()))
-        selected_bg_url = MUSIC_URLS[music_choice]
+        # Categorized music selection
+        music_category = st.selectbox(
+            "Music Category",
+            list(MUSIC_CATEGORIES.keys()),
+            help="Choose a mood or style for your podcast background music"
+        )
+        music_choice = st.selectbox(
+            "Track",
+            list(MUSIC_CATEGORIES[music_category].keys()),
+            help="All tracks are free to use (Pixabay Content License)"
+        )
+        selected_bg_url = MUSIC_CATEGORIES[music_category][music_choice]
+        
+        # Link to browse more
+        st.caption("🎵 [Browse 1,000+ free tracks on Pixabay](https://pixabay.com/music/)")
+        
     elif bg_source == "Upload Custom":
-        uploaded_bg_file = st.file_uploader("Upload Loop", type=["mp3", "wav"])
+        uploaded_bg_file = st.file_uploader(
+            "Upload Loop", 
+            type=["mp3", "wav"],
+            help="Upload your own background music (must be a seamless loop)"
+        )
 
-    with st.expander("Intro / Outro"):
-        uploaded_intro = st.file_uploader("Intro clip", type=["mp3", "wav"])
-        uploaded_outro = st.file_uploader("Outro clip", type=["mp3", "wav"])
+    with st.expander("🎬 Intro / Outro Clips"):
+        uploaded_intro = st.file_uploader(
+            "Intro clip", 
+            type=["mp3", "wav"],
+            help="Optional: plays before the podcast starts"
+        )
+        uploaded_outro = st.file_uploader(
+            "Outro clip", 
+            type=["mp3", "wav"],
+            help="Optional: plays after the podcast ends"
+        )
 
     # Session save / restore
     st.divider()
@@ -1201,7 +1268,7 @@ You can generate them one at a time or click **🚀 Generate All** to create eve
 | **Voice Pair** | Choose the host voice combination |
 | **Speaking Speed** | Per-speaker speed sliders (Host 1, Host 2, Caller) |
 | **HD Voices** | Higher quality OpenAI TTS (2× cost) |
-| **Background Music** | Preset tracks, custom upload, or none |
+| **Background Music** | 30+ preset tracks across 6 categories, custom upload, or none |
 | **Session Save/Restore** | Download your session as JSON; upload it later to continue |
 
 ---
